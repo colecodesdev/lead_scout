@@ -66,3 +66,13 @@ GOOGLE_CUSTOM_SEARCH_CX=
 ```
 
 Playwright browser install (one-time): `playwright install chromium`
+
+## Code Comments
+
+This is a learning project. Write comprehensive inline comments on every meaningful line of code explaining:
+- What the line does
+- Why it's done this way (not just what)
+- Any language features or patterns being used that aren't obvious (decorators, comprehensions, context managers, unpacking, etc.)
+- When a stdlib or third-party function is called, briefly note what it does and why it was chosen
+
+Group related lines under a block comment explaining the intent of that section before the line-by-line comments. Do not comment trivial lines like imports or blank returns unless there's something non-obvious about them (e.g., why a specific import path is used).

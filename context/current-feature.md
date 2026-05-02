@@ -1,16 +1,11 @@
 # Current Feature
 
-## Active: 01 — Project Scaffold
+## Status: Not Started
 
-**Spec:** `context/features/01-project-scaffold.md`
+## Goals
 
-**Status:** Not started
+## Notes
 
-**Goal:** Set up uv project, data models, JSON storage layer, exception hierarchy, CLI skeleton with stub subcommands, and storage unit tests.
+## History
 
-**When done:**
-- `uv run leadscout --help` prints help with all subcommands listed
-- `uv run pytest tests/test_storage.py` passes
-- `uv run ruff check src/ tests/` clean
-
-**Next:** `02-places-search.md`
+- **01 — Project Scaffold** (`01-project-scaffold.md`): uv project, data models (Business, Audit, Lead), enums (UrlSource, UrlClassification, LeadTier), JSON storage with atomic writes, exception hierarchy, CLI skeleton with 5 stub subcommands, config constants, shared httpx client factory, storage unit tests (8 passing).

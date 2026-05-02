@@ -1,0 +1,38 @@
+[project]
+name = "leadscout"
+version = "0.1.0"
+description = "Find local restaurants without websites and score them as freelance web design leads"
+requires-python = ">=3.12"
+dependencies = [
+    "click",
+    "httpx",
+    "tenacity",
+    "rapidfuzz",
+]
+
+[project.scripts]
+leadscout = "leadscout.cli:cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/leadscout"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-watch",
+    "ruff",
+]
