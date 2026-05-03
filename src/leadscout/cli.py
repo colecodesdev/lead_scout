@@ -24,6 +24,36 @@ from leadscout.storage import (
 )
 
 
+def _load_env_file(path: Path = Path(".env")) -> None:
+    """Lightweight .env loader.
+
+    Project deliberately avoids python-dotenv as a dep (per the scaffold
+    spec), so this parses .env itself. Handles the common forms:
+    ``KEY=value``, ``KEY="value"``, ``KEY='value'``, ``# comments``,
+    blank lines.
+
+    Uses ``os.environ.setdefault`` so values already exported in the
+    user's shell take precedence over what's in .env. The loader is
+    a no-op when the file is missing.
+
+    Called once from the cli() group function below so every subcommand
+    sees the keys without the user having to source .env in PowerShell.
+    """
+    if not path.exists():
+        return
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        # Strip a single layer of matching quotes (single or double).
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+
+
 # @click.group() makes this function the parent command that hosts subcommands.
 # invoke_without_command=True means running just "leadscout" (no subcommand)
 # will execute this function's body instead of showing an error.
@@ -33,6 +63,10 @@ from leadscout.storage import (
 @click.pass_context
 def cli(ctx, verbose: bool, data_dir: str) -> None:
     """LeadScout: Find restaurants that need websites."""
+    # Load .env from cwd before any subcommand reads env vars. setdefault()
+    # in the loader means values already exported in the shell still win.
+    _load_env_file()
+
     # Set log level based on --verbose flag. DEBUG shows everything,
     # INFO shows operational messages without the noisy details.
     level = logging.DEBUG if verbose else logging.INFO
