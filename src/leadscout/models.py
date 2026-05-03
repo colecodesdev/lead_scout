@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 
 # --- Enums ---
@@ -105,6 +106,11 @@ class Business:
     business_type: str = ""
     # Additional URLs found during discovery phase (besides the primary website)
     discovered_urls: list[str] = field(default_factory=list)
+    # When this record was last fetched/refreshed from the source API.
+    # Used by future re-run logic to skip recently-scanned businesses
+    # and to flag stale data. Stored as a tz-aware datetime; serialized
+    # as an ISO-8601 string by the storage encoder.
+    last_scanned: datetime | None = None
     # These get populated in later pipeline stages
     audit: Audit | None = None
     lead: Lead | None = None
@@ -130,6 +136,15 @@ class Business:
         url_source = UrlSource(payload.pop("url_source", "none"))
         url_classification = UrlClassification(payload.pop("url_classification", "none"))
 
+        # last_scanned is serialized as an ISO-8601 string by the storage
+        # encoder. Parse it back to a tz-aware datetime here so downstream
+        # code gets a real datetime, not a string. Pop it so it doesn't
+        # collide with the keyword arg below.
+        # datetime.fromisoformat handles the "+00:00" / "Z" suffix from
+        # .isoformat() output (Python 3.11+ accepts "Z" too).
+        scanned_raw = payload.pop("last_scanned", None)
+        last_scanned = datetime.fromisoformat(scanned_raw) if scanned_raw else None
+
         # Only pass keys that match actual dataclass fields, ignoring any
         # unknown keys that might exist in older stored data
         filtered = {k: v for k, v in payload.items() if k in cls.__dataclass_fields__}
@@ -137,6 +152,7 @@ class Business:
             **filtered,
             url_source=url_source,
             url_classification=url_classification,
+            last_scanned=last_scanned,
             audit=audit,
             lead=lead,
         )

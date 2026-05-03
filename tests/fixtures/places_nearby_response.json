@@ -1,0 +1,37 @@
+{
+  "places": [
+    {
+      "id": "ChIJN1t_tDeuEmsRUsoyG83frY4",
+      "displayName": {
+        "text": "Coastal Catch",
+        "languageCode": "en"
+      },
+      "formattedAddress": "100 Beach Rd, Santa Rosa Beach, FL 32459, USA",
+      "nationalPhoneNumber": "(850) 555-0123",
+      "websiteUri": "https://coastalcatch.example.com",
+      "rating": 4.6,
+      "types": ["seafood_restaurant", "restaurant", "food", "point_of_interest"]
+    },
+    {
+      "id": "ChIJrTLr-GyuEmsRBfy61i59si0",
+      "displayName": {
+        "text": "Beachside Burgers",
+        "languageCode": "en"
+      },
+      "formattedAddress": "200 Gulf Pl, Santa Rosa Beach, FL 32459, USA",
+      "websiteUri": "https://beachsideburgers.example.com",
+      "rating": 4.2,
+      "types": ["fast_food_restaurant", "restaurant", "food"]
+    },
+    {
+      "id": "ChIJxDeRJEPlpRkRHqwR2Q-IhxA",
+      "displayName": {
+        "text": "Mom's Diner",
+        "languageCode": "en"
+      },
+      "formattedAddress": "300 30A E, Santa Rosa Beach, FL 32459, USA",
+      "rating": 4.8,
+      "types": ["restaurant", "food", "point_of_interest"]
+    }
+  ]
+}

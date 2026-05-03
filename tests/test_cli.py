@@ -1,0 +1,157 @@
+"""Tests for the search subcommand handler in cli.py.
+
+We use Click's CliRunner to invoke the command exactly as a user would,
+without spawning a real subprocess. search_places is monkeypatched to a
+stub so we exercise the handler's logic (env reading, error formatting,
+slug derivation, merge+save) in isolation from the HTTP layer.
+"""
+
+from datetime import datetime, timezone
+
+import pytest
+from click.testing import CliRunner
+
+from leadscout.cli import cli
+from leadscout.exceptions import APIError
+from leadscout.models import Business, UrlClassification, UrlSource
+from leadscout.storage import load_data
+
+
+def _make_business(**overrides) -> Business:
+    """Mirror of the helper in test_storage.py, copied here to keep the
+    test files independent. Defaults match a typical Places API result."""
+    defaults = {
+        "place_id": "abc123",
+        "name": "Test Restaurant",
+        "address": "123 Main St",
+        "phone": "",
+        "website": "https://example.com",
+        "url_source": UrlSource.GOOGLE_PLACES,
+        "url_classification": UrlClassification.OFFICIAL_SITE,
+        "rating": 4.5,
+        "review_count": 0,
+        "business_type": "restaurant",
+        "last_scanned": datetime(2026, 5, 3, tzinfo=timezone.utc),
+    }
+    defaults.update(overrides)
+    return Business(**defaults)
+
+
+@pytest.fixture
+def runner():
+    """A fresh CliRunner per test; isolates filesystem and stdio captures."""
+    return CliRunner()
+
+
+class TestSearchCommand:
+    def test_missing_api_key_exits_with_error(self, runner, monkeypatch, tmp_path):
+        # Ensure the env var is absent. delenv with raising=False is a
+        # no-op when the var doesn't exist, so the test works regardless
+        # of the developer's local shell environment.
+        monkeypatch.delenv("GOOGLE_PLACES_API_KEY", raising=False)
+
+        result = runner.invoke(
+            cli,
+            ["--data-dir", str(tmp_path), "search", "--location", "Anywhere, USA"],
+        )
+
+        # Non-zero exit signals failure to shells/pipelines.
+        assert result.exit_code != 0
+        # Error text should call out the missing variable so the user
+        # knows what to fix without reading the source.
+        assert "GOOGLE_PLACES_API_KEY" in result.output
+
+    def test_happy_path_writes_slugified_file(self, runner, monkeypatch, tmp_path):
+        # Provide an API key so the env check passes; the value is never
+        # actually used because we stub search_places below.
+        monkeypatch.setenv("GOOGLE_PLACES_API_KEY", "fake")
+
+        # Stub search_places to return a fixed list so we test the CLI
+        # handler's wiring, not the HTTP layer (which has its own tests).
+        sample = [
+            _make_business(place_id="A", name="Alpha"),
+            _make_business(place_id="B", name="Beta"),
+        ]
+        monkeypatch.setattr(
+            "leadscout.cli.search_places", lambda *args, **kwargs: sample
+        )
+
+        result = runner.invoke(
+            cli,
+            [
+                "--data-dir",
+                str(tmp_path),
+                "search",
+                "--location",
+                "Santa Rosa Beach, FL",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        # Slug is lowercase, non-word chars collapsed to "_", trailing
+        # underscores stripped. "Santa Rosa Beach, FL" -> "santa_rosa_beach_fl".
+        expected_path = tmp_path / "santa_rosa_beach_fl.json"
+        assert expected_path.exists()
+        # Loaded businesses should match what we returned.
+        loaded = load_data(expected_path)
+        assert {b.place_id for b in loaded} == {"A", "B"}
+        # Summary should mention the count and "new" indicator.
+        assert "Found 2 businesses" in result.output
+        assert "(2 new)" in result.output
+
+    def test_merges_into_existing_data(self, runner, monkeypatch, tmp_path):
+        # First run creates the file. Second run with one overlapping
+        # record (same place_id) and one fresh record should merge into
+        # the existing file and report "1 new".
+        monkeypatch.setenv("GOOGLE_PLACES_API_KEY", "fake")
+
+        first_run = [_make_business(place_id="A", name="Alpha")]
+        second_run = [
+            _make_business(place_id="A", name="Alpha Renamed"),
+            _make_business(place_id="C", name="Gamma"),
+        ]
+
+        # iter() lets us return different lists across the two invocations
+        # without the stub having to inspect call args.
+        results_iter = iter([first_run, second_run])
+        monkeypatch.setattr(
+            "leadscout.cli.search_places",
+            lambda *args, **kwargs: next(results_iter),
+        )
+
+        # Run 1
+        runner.invoke(
+            cli, ["--data-dir", str(tmp_path), "search", "--location", "Town, ST"]
+        )
+        # Run 2
+        result = runner.invoke(
+            cli, ["--data-dir", str(tmp_path), "search", "--location", "Town, ST"]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "(1 new)" in result.output
+
+        loaded = load_data(tmp_path / "town_st.json")
+        by_id = {b.place_id: b for b in loaded}
+        # Both place_ids present, with the renamed one's update applied.
+        assert set(by_id) == {"A", "C"}
+        assert by_id["A"].name == "Alpha Renamed"
+
+    def test_apierror_surfaces_as_user_message(self, runner, monkeypatch, tmp_path):
+        # search_places raising APIError should produce a clean stderr
+        # message and a non-zero exit, not a Python traceback.
+        monkeypatch.setenv("GOOGLE_PLACES_API_KEY", "fake")
+
+        def boom(*args, **kwargs):
+            raise APIError("Geocoding returned no results for 'nowhere'")
+
+        monkeypatch.setattr("leadscout.cli.search_places", boom)
+
+        result = runner.invoke(
+            cli,
+            ["--data-dir", str(tmp_path), "search", "--location", "nowhere"],
+        )
+
+        assert result.exit_code != 0
+        # The APIError message text should appear in the output verbatim.
+        assert "Geocoding returned no results" in result.output

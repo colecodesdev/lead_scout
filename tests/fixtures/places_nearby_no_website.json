@@ -1,0 +1,14 @@
+{
+  "places": [
+    {
+      "id": "ChIJxDeRJEPlpRkRHqwR2Q-IhxA",
+      "displayName": {
+        "text": "Mom's Diner",
+        "languageCode": "en"
+      },
+      "formattedAddress": "300 30A E, Santa Rosa Beach, FL 32459, USA",
+      "rating": 4.8,
+      "types": ["restaurant", "food", "point_of_interest"]
+    }
+  ]
+}

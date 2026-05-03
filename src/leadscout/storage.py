@@ -2,6 +2,7 @@ import json
 import logging
 import tempfile
 from dataclasses import asdict
+from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 
@@ -12,16 +13,25 @@ logger = logging.getLogger(__name__)
 
 
 class _EnumEncoder(json.JSONEncoder):
-    """Custom JSON encoder that serializes StrEnum members as plain strings.
+    """Custom JSON encoder for our non-stdlib-friendly types.
 
-    dataclasses.asdict() converts nested dataclasses recursively, but enum
-    members come through as their StrEnum instances rather than raw strings.
-    This encoder calls .value on any StrEnum to get the plain string for JSON.
+    dataclasses.asdict() converts nested dataclasses recursively but does
+    NOT convert enum members or datetimes into JSON-friendly forms. They
+    arrive at the encoder as live Python objects, and json.dumps doesn't
+    know how to handle them by default. This subclass intercepts those
+    types and emits the appropriate primitive (str for both).
     """
 
     def default(self, o):
+        # StrEnum values serialize to their underlying string. .value
+        # returns the raw string declared on the enum member.
         if isinstance(o, StrEnum):
             return o.value
+        # datetimes serialize to ISO-8601 strings. .isoformat() produces a
+        # round-trippable representation (e.g. "2026-05-03T12:34:56+00:00")
+        # that datetime.fromisoformat can parse back during load.
+        if isinstance(o, datetime):
+            return o.isoformat()
         # Fall back to the parent's default(), which raises TypeError for
         # truly unserializable types
         return super().default(o)

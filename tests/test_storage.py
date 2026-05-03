@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -48,6 +49,17 @@ class TestSaveAndLoad:
         assert b.url_classification == UrlClassification.OFFICIAL_SITE
         assert b.rating == 4.5
         assert b.review_count == 100
+
+    def test_round_trip_last_scanned_datetime(self, data_file):
+        # last_scanned was added in feature 02; the storage encoder must
+        # serialize tz-aware datetimes to ISO-8601 strings, and from_dict
+        # must parse them back to a tz-aware datetime equal to the original.
+        scanned_at = datetime(2026, 5, 3, 12, 30, 45, tzinfo=timezone.utc)
+        original = _make_business(last_scanned=scanned_at)
+        save_data(data_file, [original])
+        loaded = load_data(data_file)
+        assert len(loaded) == 1
+        assert loaded[0].last_scanned == scanned_at
 
     def test_round_trip_with_audit_and_lead(self, data_file):
         audit = Audit(performance_score=0.85, has_ssl=True, has_menu_page=True)
