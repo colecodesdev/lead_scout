@@ -558,14 +558,14 @@ class TestRunCommand:
         # Slugified data file written to disk.
         assert (tmp_path / "test_town_st.json").exists()
 
-    def test_run_fails_fast_on_missing_env(
+    def test_run_fails_fast_when_places_key_missing(
         self, runner, monkeypatch, tmp_path
     ):
-        # Hard-fail when any required env var is missing rather than
-        # half-running the pipeline.
-        monkeypatch.setenv("GOOGLE_PLACES_API_KEY", "places-key")
-        monkeypatch.delenv("GOOGLE_CUSTOM_SEARCH_API_KEY", raising=False)
-        monkeypatch.delenv("GOOGLE_CUSTOM_SEARCH_CX", raising=False)
+        # Places is the entry point; without it nothing else can run.
+        # Hard-fail with a clear message rather than starting the pipeline.
+        monkeypatch.delenv("GOOGLE_PLACES_API_KEY", raising=False)
+        monkeypatch.setenv("GOOGLE_CUSTOM_SEARCH_API_KEY", "cs-key")
+        monkeypatch.setenv("GOOGLE_CUSTOM_SEARCH_CX", "cs-cx")
 
         result = runner.invoke(
             cli,
@@ -575,8 +575,132 @@ class TestRunCommand:
             ],
         )
         assert result.exit_code != 0
-        assert "GOOGLE_CUSTOM_SEARCH_API_KEY" in result.output
-        assert "GOOGLE_CUSTOM_SEARCH_CX" in result.output
+        assert "GOOGLE_PLACES_API_KEY" in result.output
+
+    def test_run_skips_discovery_when_custom_search_env_missing(
+        self, runner, monkeypatch, tmp_path
+    ):
+        # Custom Search is optional. Missing env vars -> skip discovery,
+        # call reclassify_urls instead (local-only domain classification),
+        # continue with audit + score.
+        monkeypatch.setenv("GOOGLE_PLACES_API_KEY", "places-key")
+        monkeypatch.delenv("GOOGLE_CUSTOM_SEARCH_API_KEY", raising=False)
+        monkeypatch.delenv("GOOGLE_CUSTOM_SEARCH_CX", raising=False)
+
+        called: list[str] = []
+
+        def fake_search(location, radius, key):
+            called.append("search")
+            return [
+                _make_business(
+                    place_id="A",
+                    url_classification=UrlClassification.NONE,
+                )
+            ]
+
+        def fake_discover(*args, **kwargs):
+            called.append("discover")
+            return args[0]
+
+        def fake_reclassify(businesses):
+            called.append("reclassify")
+            return businesses
+
+        def fake_audit(businesses, *args, **kwargs):
+            called.append("audit")
+            return businesses
+
+        def fake_score(businesses):
+            from leadscout.models import Lead, LeadTier
+
+            called.append("score")
+            for b in businesses:
+                b.lead = Lead(tier=LeadTier.NO_WEBSITE, score=80, reasons=[])
+            return businesses
+
+        monkeypatch.setattr("leadscout.cli.search_places", fake_search)
+        monkeypatch.setattr("leadscout.cli.discover_urls", fake_discover)
+        monkeypatch.setattr("leadscout.cli.reclassify_urls", fake_reclassify)
+        monkeypatch.setattr("leadscout.cli.audit_websites", fake_audit)
+        monkeypatch.setattr("leadscout.cli.score_leads", fake_score)
+
+        result = runner.invoke(
+            cli,
+            [
+                "--data-dir", str(tmp_path), "run",
+                "--location", "Test Town, ST",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        # discover NOT called; reclassify ran in its place; audit + score continued.
+        assert called == ["search", "reclassify", "audit", "score"]
+        assert "SKIPPED" in result.output
+
+    def test_run_falls_back_when_custom_search_raises_apierror(
+        self, runner, monkeypatch, tmp_path
+    ):
+        # Custom Search env vars present, but the API returns a runtime
+        # denial (e.g., "project does not have access" 403 for new GCP
+        # projects). Run should catch the APIError, log, and fall back
+        # to reclassify_urls so audit + score still execute.
+        monkeypatch.setenv("GOOGLE_PLACES_API_KEY", "places-key")
+        monkeypatch.setenv("GOOGLE_CUSTOM_SEARCH_API_KEY", "cs-key")
+        monkeypatch.setenv("GOOGLE_CUSTOM_SEARCH_CX", "cs-cx")
+
+        called: list[str] = []
+
+        def fake_search(location, radius, key):
+            called.append("search")
+            return [
+                _make_business(
+                    place_id="A",
+                    url_classification=UrlClassification.NONE,
+                )
+            ]
+
+        def fake_discover(*args, **kwargs):
+            called.append("discover")
+            raise APIError(
+                "Custom Search unavailable (HTTP 403): "
+                "This project does not have the access to Custom Search JSON API."
+            )
+
+        def fake_reclassify(businesses):
+            called.append("reclassify")
+            return businesses
+
+        def fake_audit(businesses, *args, **kwargs):
+            called.append("audit")
+            return businesses
+
+        def fake_score(businesses):
+            from leadscout.models import Lead, LeadTier
+
+            called.append("score")
+            for b in businesses:
+                b.lead = Lead(tier=LeadTier.NO_WEBSITE, score=80, reasons=[])
+            return businesses
+
+        monkeypatch.setattr("leadscout.cli.search_places", fake_search)
+        monkeypatch.setattr("leadscout.cli.discover_urls", fake_discover)
+        monkeypatch.setattr("leadscout.cli.reclassify_urls", fake_reclassify)
+        monkeypatch.setattr("leadscout.cli.audit_websites", fake_audit)
+        monkeypatch.setattr("leadscout.cli.score_leads", fake_score)
+
+        result = runner.invoke(
+            cli,
+            [
+                "--data-dir", str(tmp_path), "run",
+                "--location", "Test Town, ST",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        # discover was attempted, raised, then reclassify ran as fallback.
+        assert called == ["search", "discover", "reclassify", "audit", "score"]
+        assert "Custom Search unavailable" in result.output
+        assert "Falling back" in result.output
 
     def test_run_force_flag_propagates_to_stages(
         self, runner, monkeypatch, tmp_path

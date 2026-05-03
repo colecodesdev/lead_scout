@@ -6,7 +6,7 @@ import click
 
 from leadscout.audit import audit_websites
 from leadscout.config import DEFAULT_RADIUS
-from leadscout.discovery import discover_urls
+from leadscout.discovery import discover_urls, reclassify_urls
 from leadscout.exceptions import APIError, LeadScoutError
 from leadscout.models import LeadTier, UrlClassification, UrlSource
 from leadscout.scoring import (
@@ -378,28 +378,34 @@ def _print_ranked_summary(ranked: list) -> None:
 @click.pass_context
 def run(ctx, location: str, radius: int, force: bool, export: str | None) -> None:
     """Run the full pipeline: search -> discover -> audit -> score."""
-    # Validate every required env var upfront so the user doesn't get
-    # halfway through a long run before discovering they're missing
-    # GOOGLE_CUSTOM_SEARCH_CX. Hard-fail rather than degrading.
+    # Places is the only hard requirement (it's the entry point of the
+    # pipeline). Custom Search is optional: if its env vars are absent
+    # OR if it returns a project-level denial at runtime, we skip the
+    # web-discovery step and fall back to local domain-only
+    # reclassification so the rest of the pipeline still produces leads.
+    # Background: as of Jan 2026 Google closed the Custom Search JSON
+    # API to new GCP projects, so for many users discovery is simply
+    # unavailable through no fault of their config.
     places_key = os.environ.get("GOOGLE_PLACES_API_KEY")
     cs_key = os.environ.get("GOOGLE_CUSTOM_SEARCH_API_KEY")
     cs_cx = os.environ.get("GOOGLE_CUSTOM_SEARCH_CX")
     psi_key = (
         os.environ.get("GOOGLE_PAGESPEED_API_KEY") or places_key or None
     )
-    missing: list[str] = []
     if not places_key:
-        missing.append("GOOGLE_PLACES_API_KEY")
-    if not cs_key:
-        missing.append("GOOGLE_CUSTOM_SEARCH_API_KEY")
-    if not cs_cx:
-        missing.append("GOOGLE_CUSTOM_SEARCH_CX")
-    if missing:
         click.echo(
-            "Error: missing required env var(s): " + ", ".join(missing),
+            "Error: GOOGLE_PLACES_API_KEY is not set in the environment.",
             err=True,
         )
         ctx.exit(1)
+
+    # Decide upfront whether Custom Search is available. None means yes;
+    # a non-None reason string means we'll skip discovery + log why.
+    skip_discover_reason: str | None = None
+    if not cs_key or not cs_cx:
+        skip_discover_reason = (
+            "GOOGLE_CUSTOM_SEARCH_API_KEY or GOOGLE_CUSTOM_SEARCH_CX not set"
+        )
 
     data_dir = Path(ctx.obj["data_dir"])
     path = data_path_for_location(data_dir, location)
@@ -421,10 +427,32 @@ def run(ctx, location: str, radius: int, force: bool, export: str | None) -> Non
         click.echo(f"        found  : {len(found)} ({len(businesses)} total)")
 
         # --- Stage 2: discover (Custom Search + classify) ---
-        click.echo("[2/4] discover : Custom Search + URL classification")
-        discover_urls(
-            businesses, cs_key, cs_cx, data_dir=data_dir, force=force
-        )
+        if skip_discover_reason:
+            # Env-var-driven skip path: never even try the network call.
+            click.echo(
+                f"[2/4] discover : SKIPPED ({skip_discover_reason}); "
+                "running classification only"
+            )
+            reclassify_urls(businesses)
+        else:
+            click.echo("[2/4] discover : Custom Search + URL classification")
+            try:
+                discover_urls(
+                    businesses, cs_key, cs_cx, data_dir=data_dir, force=force
+                )
+            except APIError as e:
+                # Runtime denial (e.g., the "project does not have access"
+                # 403 that affects new GCP projects). Fall back to the
+                # local-only classification so the pipeline continues
+                # rather than aborting before audit and score.
+                click.echo(
+                    f"        Custom Search unavailable: {e}", err=True
+                )
+                click.echo(
+                    "        Falling back to classification-only.",
+                    err=True,
+                )
+                reclassify_urls(businesses)
         save_data(path, businesses)
 
         # --- Stage 3: audit (PSI + Playwright) ---
@@ -437,6 +465,8 @@ def run(ctx, location: str, radius: int, force: bool, export: str | None) -> Non
         score_leads(businesses)
         save_data(path, businesses)
     except APIError as e:
+        # Search/audit/score errors still hard-fail; only Custom Search
+        # was downgraded to soft-fail above (caught inside its try).
         click.echo(f"Error: {e}", err=True)
         ctx.exit(1)
     except LeadScoutError as e:

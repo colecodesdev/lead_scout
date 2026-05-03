@@ -349,6 +349,36 @@ def _build_query(business: Business) -> str:
 # ---------------------------------------------------------------------------
 
 
+def reclassify_urls(businesses: list[Business]) -> list[Business]:
+    """Recompute `url_classification` for every business with a `website`.
+
+    Pure local logic; no API calls. Always safe to invoke. Callable on
+    its own when Custom Search isn't usable (e.g., the project doesn't
+    have access to the Custom Search JSON API), so the pipeline can
+    still correct misclassifications even without web discovery.
+
+    Used by:
+    - `discover_urls` after the search step (so newly-discovered URLs
+      and Places-sourced URLs both get the same domain-based bucket).
+    - `cli.run` directly when Custom Search is unavailable.
+
+    Mutates each business in place AND returns the same list.
+    """
+    for biz in businesses:
+        if not biz.website:
+            continue
+        new_class = _classify_url(biz.website)
+        if new_class != biz.url_classification:
+            logger.info(
+                "Reclassified %s: %s -> %s",
+                biz.name,
+                biz.url_classification.value,
+                new_class.value,
+            )
+        biz.url_classification = new_class
+    return businesses
+
+
 def discover_urls(
     businesses: list[Business],
     api_key: str,
@@ -364,14 +394,16 @@ def discover_urls(
     business's `website` / `url_source` / `url_classification`.
 
     For ALL businesses with a non-empty `website`, recomputes
-    `url_classification` based on the URL's domain. This corrects the
-    placeholder classification feature 02 stamps on Places-sourced URLs.
+    `url_classification` via `reclassify_urls` (no API needed; corrects
+    placeholder classifications feature 02 stamps on Places-sourced URLs).
 
     Mutates the input list in place AND returns it (callers can pick
     whichever style they prefer; we return for chainability).
 
     Raises APIError on auth/quota failures from Custom Search after
-    tenacity retries are exhausted.
+    tenacity retries are exhausted. The local classification pass below
+    runs after the search loop, so callers that catch APIError won't
+    have a partially-classified list.
     """
     quota = QuotaTracker(data_dir)
     logger.info(
@@ -382,25 +414,14 @@ def discover_urls(
     # Single client for the whole batch; reuses connection pool.
     with create_client() as client:
         for biz in businesses:
-            # --- Step 1: search if needed ---
             # Skip already-discovered/owned URLs unless --force.
             needs_search = force or biz.url_source == UrlSource.NONE
             if needs_search:
                 _maybe_search_one(biz, client, api_key, cx, quota)
 
-            # --- Step 2: classify any URL we have ---
-            # Runs unconditionally for businesses with a website, so we
-            # catch URLs that came in mis-classified from feature 02.
-            if biz.website:
-                new_class = _classify_url(biz.website)
-                if new_class != biz.url_classification:
-                    logger.info(
-                        "Reclassified %s: %s -> %s",
-                        biz.name,
-                        biz.url_classification.value,
-                        new_class.value,
-                    )
-                biz.url_classification = new_class
+    # Always reclassify after the search loop so newly-discovered URLs
+    # and existing Places-sourced URLs get consistent domain-based buckets.
+    reclassify_urls(businesses)
 
     return businesses
 
