@@ -94,16 +94,52 @@ AUDIT_FRESHNESS_DAYS = 7
 # 50 is Google's "needs improvement" boundary.
 AUDIT_PERFORMANCE_THRESHOLD = 50
 
-# --- Lead scoring weights ---
-# Each key maps a deficiency to the points it adds to a business's lead score.
-# Higher score = better lead (more likely to need a website or improvements).
-SCORE_WEIGHTS = {
-    "no_website": 100,  # No website at all: highest-value lead
-    "low_performance": 30,  # PageSpeed performance score below threshold
-    "no_ssl": 20,  # Site served over HTTP, not HTTPS
-    "not_mobile_friendly": 15,  # Fails mobile-friendly checks
-    "no_menu_page": 10,  # Restaurant has no menu page
-    "no_online_ordering": 10,  # No online ordering capability
-    "no_reservation_system": 5,  # No reservation/booking system
-    "no_contact_info": 10,  # Missing phone/email/address on site
+# --- Lead scoring (feature 05) ---
+# All thresholds and weights live here, NOT in scoring.py, so they can
+# be tuned after the first real scan without touching application logic.
+#
+# Tier base scores. A business is assigned a single tier; the tier's
+# base is the starting score before additive modifiers below.
+# Higher base = better lead (more likely to need a website or upgrades).
+
+# Lead tier base scores. Imported as a dict keyed by LeadTier enum values.
+# Strings as keys (rather than the enum members directly) so config.py
+# stays free of model imports and avoids any import-cycle risk.
+LEAD_TIER_BASE_SCORES = {
+    "no_website": 80,
+    "failing_audit": 60,
+    "missing_features": 40,
+    "skip": 0,
 }
+
+# Customer-facing DOM checks. Used in two places by the scoring step:
+# (a) tier assignment: 3+ failures across this set bumps a business
+#     from `missing_features` up to `failing_audit`;
+# (b) score modifiers: each missing element adds SCORE_PER_DOM_FAILURE
+#     points.
+# Mobile-viewport is intentionally excluded from this list: it's a
+# developer concern, not a customer-facing feature.
+SCORING_DOM_FIELDS = (
+    "has_menu",
+    "has_hours",
+    "has_contact_info",
+    "has_ssl",
+    "has_online_ordering",
+    "has_reservation",
+)
+# Failures across SCORING_DOM_FIELDS at or above this count -> failing_audit.
+SCORING_DOM_FAILURE_TIER_THRESHOLD = 3
+# Lighthouse mobile performance OR accessibility below this -> failing_audit.
+SCORING_LIGHTHOUSE_FAIL_THRESHOLD = 50
+
+# Score modifiers (additive). All clamped at SCORE_MAX after summing.
+SCORE_NO_PRESENCE_BONUS = 10  # url_classification == none (no social/dir either)
+SCORE_RATING_TIER_1_BONUS = 5  # rating >= 4.0
+SCORE_RATING_TIER_2_BONUS = 5  # rating >= 4.5 (additional, total +10)
+SCORE_PER_DOM_FAILURE = 2  # per missing SCORING_DOM_FIELDS element
+SCORE_PERF_BAD_THRESHOLD = 30  # mobile perf below this -> bonus applied
+SCORE_PERF_BAD_BONUS = 5
+SCORE_SLOW_LOAD_THRESHOLD_S = 5.0  # seconds; load_time over this -> bonus
+SCORE_SLOW_LOAD_BONUS = 3
+SCORE_BROKEN_ASSETS_BONUS = 2  # any broken assets at all
+SCORE_MAX = 100  # cap after all modifiers

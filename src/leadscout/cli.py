@@ -1,6 +1,5 @@
 import logging
 import os
-import re
 from pathlib import Path
 
 import click
@@ -9,9 +8,20 @@ from leadscout.audit import audit_websites
 from leadscout.config import DEFAULT_RADIUS
 from leadscout.discovery import discover_urls
 from leadscout.exceptions import APIError, LeadScoutError
-from leadscout.models import UrlClassification, UrlSource
+from leadscout.models import LeadTier, UrlClassification, UrlSource
+from leadscout.scoring import (
+    csv_path_for_data_file,
+    export_to_csv,
+    rank_leads,
+    score_leads,
+)
 from leadscout.search import search_places
-from leadscout.storage import load_data, merge_business, save_data
+from leadscout.storage import (
+    data_path_for_location,
+    load_data,
+    merge_business,
+    save_data,
+)
 
 
 # @click.group() makes this function the parent command that hosts subcommands.
@@ -92,14 +102,11 @@ def search(ctx, location: str, radius: int) -> None:
         click.echo(f"Unexpected LeadScout error: {e}", err=True)
         ctx.exit(1)
 
-    # Derive the per-location data file. Slug the location string so it's
-    # filesystem-safe: lowercase, non-word characters collapsed to "_".
-    # re.sub(r"[^\w]+", "_", ...) replaces runs of non-[a-zA-Z0-9_]
-    # characters with a single underscore; .strip("_") trims any leading/
-    # trailing underscores (e.g., from a trailing comma).
+    # Derive the per-location data file via the storage helper so the
+    # `run` subcommand below uses the exact same slug logic without
+    # duplicating it.
     data_dir = Path(ctx.obj["data_dir"])
-    slug = re.sub(r"[^\w]+", "_", location.lower()).strip("_")
-    path = data_dir / f"{slug}.json"
+    path = data_path_for_location(data_dir, location)
 
     # Merge into existing data: load any prior results for this location,
     # update existing records by place_id, and append new ones.
@@ -273,14 +280,173 @@ def audit(ctx, data_file: str, force: bool) -> None:
 
 
 @cli.command()
+@click.option(
+    "--data-file",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Path to a JSON file produced by `search` / `discover` / `audit`.",
+)
+@click.option(
+    "--export",
+    type=click.Choice(["csv"], case_sensitive=False),
+    default=None,
+    help="Optional: also export ranked leads to CSV.",
+)
 @click.pass_context
-def score(ctx) -> None:
+def score(ctx, data_file: str, export: str | None) -> None:
     """Score and rank businesses as leads."""
-    click.echo("Not yet implemented.")
+    path = Path(data_file)
+    businesses = load_data(path)
+    if not businesses:
+        click.echo(f"No businesses in {path}; run `search` first.")
+        return
+
+    # Score in place; persist before printing the ranked summary so
+    # the JSON on disk is the source of truth even if stdout gets
+    # piped/truncated.
+    score_leads(businesses)
+    save_data(path, businesses)
+
+    ranked = rank_leads(businesses)
+    _print_ranked_summary(ranked)
+
+    if export == "csv":
+        csv_path = csv_path_for_data_file(path)
+        export_to_csv(ranked, csv_path)
+        click.echo(f"Exported leads to {csv_path}")
+
+
+def _print_ranked_summary(ranked: list) -> None:
+    """Print a human-readable summary of ranked leads to stdout.
+
+    Format: rank, name, score, tier, top 3 reasons. Skip-tier entries
+    are excluded from the visible summary (still stored in the JSON
+    for completeness, per spec).
+    """
+    visible = [
+        b
+        for b in ranked
+        if b.lead is not None and b.lead.tier != LeadTier.SKIP
+    ]
+    if not visible:
+        click.echo("No leads above skip tier.")
+        return
+
+    # Title line so the columns aren't a wall of context-free numbers.
+    click.echo("\nRanked leads (top to bottom):")
+    click.echo("=" * 60)
+    for rank, biz in enumerate(visible, start=1):
+        # biz.lead is non-None per the filter above.
+        top_reasons = "; ".join(biz.lead.reasons[:3])
+        click.echo(
+            f"{rank}. {biz.name}  [{biz.lead.tier.value}]  "
+            f"score={biz.lead.score}"
+        )
+        if top_reasons:
+            click.echo(f"   {top_reasons}")
+    click.echo("=" * 60)
+    click.echo(
+        f"Total leads above skip tier: {len(visible)} / "
+        f"{len(ranked)} businesses."
+    )
 
 
 @cli.command()
+@click.option(
+    "--location",
+    required=True,
+    help='City/state to search around, e.g. "Santa Rosa Beach, FL".',
+)
+@click.option(
+    "--radius",
+    default=DEFAULT_RADIUS,
+    type=int,
+    show_default=True,
+    help="Search radius in meters.",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Force re-discovery + re-audit on existing entries.",
+)
+@click.option(
+    "--export",
+    type=click.Choice(["csv"], case_sensitive=False),
+    default=None,
+    help="Optional: also export ranked leads to CSV after scoring.",
+)
 @click.pass_context
-def run(ctx) -> None:
+def run(ctx, location: str, radius: int, force: bool, export: str | None) -> None:
     """Run the full pipeline: search -> discover -> audit -> score."""
-    click.echo("Not yet implemented.")
+    # Validate every required env var upfront so the user doesn't get
+    # halfway through a long run before discovering they're missing
+    # GOOGLE_CUSTOM_SEARCH_CX. Hard-fail rather than degrading.
+    places_key = os.environ.get("GOOGLE_PLACES_API_KEY")
+    cs_key = os.environ.get("GOOGLE_CUSTOM_SEARCH_API_KEY")
+    cs_cx = os.environ.get("GOOGLE_CUSTOM_SEARCH_CX")
+    psi_key = (
+        os.environ.get("GOOGLE_PAGESPEED_API_KEY") or places_key or None
+    )
+    missing: list[str] = []
+    if not places_key:
+        missing.append("GOOGLE_PLACES_API_KEY")
+    if not cs_key:
+        missing.append("GOOGLE_CUSTOM_SEARCH_API_KEY")
+    if not cs_cx:
+        missing.append("GOOGLE_CUSTOM_SEARCH_CX")
+    if missing:
+        click.echo(
+            "Error: missing required env var(s): " + ", ".join(missing),
+            err=True,
+        )
+        ctx.exit(1)
+
+    data_dir = Path(ctx.obj["data_dir"])
+    path = data_path_for_location(data_dir, location)
+
+    try:
+        # --- Stage 1: search (Google Places) ---
+        click.echo(f"[1/4] search   : {location} (radius={radius}m)")
+        found = search_places(location, radius, places_key)
+        # Merge into existing data if the location was scanned before.
+        existing = load_data(path)
+        by_id = {b.place_id: b for b in existing}
+        for b in found:
+            if b.place_id in by_id:
+                merge_business(by_id[b.place_id], b)
+            else:
+                by_id[b.place_id] = b
+        businesses = list(by_id.values())
+        save_data(path, businesses)
+        click.echo(f"        found  : {len(found)} ({len(businesses)} total)")
+
+        # --- Stage 2: discover (Custom Search + classify) ---
+        click.echo("[2/4] discover : Custom Search + URL classification")
+        discover_urls(
+            businesses, cs_key, cs_cx, data_dir=data_dir, force=force
+        )
+        save_data(path, businesses)
+
+        # --- Stage 3: audit (PSI + Playwright) ---
+        click.echo("[3/4] audit    : PageSpeed Insights + Playwright DOM")
+        audit_websites(businesses, psi_key, force=force)
+        save_data(path, businesses)
+
+        # --- Stage 4: score ---
+        click.echo("[4/4] score    : tier + numeric ranking")
+        score_leads(businesses)
+        save_data(path, businesses)
+    except APIError as e:
+        click.echo(f"Error: {e}", err=True)
+        ctx.exit(1)
+    except LeadScoutError as e:
+        click.echo(f"Error: {e}", err=True)
+        ctx.exit(1)
+
+    ranked = rank_leads(businesses)
+    _print_ranked_summary(ranked)
+
+    if export == "csv":
+        csv_path = csv_path_for_data_file(path)
+        export_to_csv(ranked, csv_path)
+        click.echo(f"Exported leads to {csv_path}")

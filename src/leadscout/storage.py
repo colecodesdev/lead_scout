@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import tempfile
 from dataclasses import asdict
 from datetime import datetime
@@ -10,6 +11,27 @@ from leadscout.exceptions import StorageError
 from leadscout.models import Business
 
 logger = logging.getLogger(__name__)
+
+
+# Slug regex: any run of non-word characters becomes a single underscore.
+# Compiled once at module load. Used by data_path_for_location below.
+_LOCATION_SLUG_RE = re.compile(r"[^\w]+")
+
+
+def data_path_for_location(data_dir: Path, location: str) -> Path:
+    """Resolve the per-location JSON file path under `data_dir`.
+
+    Slugifies the location string for use as a filename: lowercases,
+    replaces runs of non-word characters with single underscores, and
+    strips trailing underscores. Used by the `search` subcommand to
+    write the file and by `run` to thread it through the pipeline.
+
+    Example:
+        data_path_for_location(Path("./data"), "Santa Rosa Beach, FL")
+        -> Path("./data/santa_rosa_beach_fl.json")
+    """
+    slug = _LOCATION_SLUG_RE.sub("_", location.lower()).strip("_")
+    return data_dir / f"{slug}.json"
 
 
 class _EnumEncoder(json.JSONEncoder):

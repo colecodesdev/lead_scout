@@ -420,3 +420,266 @@ class TestAuditCommand:
         # 1 official + 1 social: only the official one was audited.
         assert "1 businesses audited" in result.output
         assert "2 total deficiencies" in result.output
+
+
+class TestScoreCommand:
+    def _seed_data_file(self, tmp_path) -> str:
+        path = tmp_path / "leads.json"
+        save_data(
+            path,
+            [
+                _make_business(
+                    place_id="A",
+                    name="NoSiteBiz",
+                    website="",
+                    url_classification=UrlClassification.NONE,
+                    rating=4.6,
+                ),
+                _make_business(
+                    place_id="B",
+                    name="CleanBiz",
+                    website="https://clean.example.com",
+                    url_classification=UrlClassification.OFFICIAL_SITE,
+                ),
+            ],
+        )
+        return str(path)
+
+    def test_score_writes_lead_to_each_business(
+        self, runner, monkeypatch, tmp_path
+    ):
+        data_file = self._seed_data_file(tmp_path)
+        result = runner.invoke(
+            cli,
+            ["--data-dir", str(tmp_path), "score", "--data-file", data_file],
+        )
+
+        assert result.exit_code == 0, result.output
+        # Reload to confirm Lead was attached and persisted.
+        from leadscout.storage import load_data
+
+        loaded = load_data(tmp_path / "leads.json")
+        for b in loaded:
+            assert b.lead is not None
+
+    def test_score_summary_excludes_skip_tier(
+        self, runner, monkeypatch, tmp_path
+    ):
+        # CleanBiz (no audit) -> SKIP. NoSiteBiz -> NO_WEBSITE.
+        # Summary should show only the no-website business.
+        data_file = self._seed_data_file(tmp_path)
+        result = runner.invoke(
+            cli,
+            ["--data-dir", str(tmp_path), "score", "--data-file", data_file],
+        )
+        assert "NoSiteBiz" in result.output
+        assert "CleanBiz" not in result.output
+
+    def test_export_csv_writes_file(self, runner, monkeypatch, tmp_path):
+        data_file = self._seed_data_file(tmp_path)
+        result = runner.invoke(
+            cli,
+            [
+                "--data-dir", str(tmp_path), "score",
+                "--data-file", data_file, "--export", "csv",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        # CSV file written to the data file's parent dir, named with today's UTC date.
+        csv_files = list(tmp_path.glob("leads_*.csv"))
+        assert len(csv_files) == 1
+        # Confirm header and at least one data row.
+        import csv as _csv
+
+        with open(csv_files[0], encoding="utf-8", newline="") as f:
+            rows = list(_csv.DictReader(f))
+        assert len(rows) >= 1
+        assert "rank" in rows[0]
+        assert "tier" in rows[0]
+
+
+class TestRunCommand:
+    def test_run_chains_all_four_stages(
+        self, runner, monkeypatch, tmp_path
+    ):
+        # Set every required env var so the upfront check passes.
+        monkeypatch.setenv("GOOGLE_PLACES_API_KEY", "places-key")
+        monkeypatch.setenv("GOOGLE_CUSTOM_SEARCH_API_KEY", "cs-key")
+        monkeypatch.setenv("GOOGLE_CUSTOM_SEARCH_CX", "cs-cx")
+
+        # Track which stages were called and in what order so we
+        # validate the chaining contract (search -> discover -> audit -> score).
+        stages_called: list[str] = []
+
+        def fake_search(location, radius, key):
+            stages_called.append("search")
+            return [
+                _make_business(
+                    place_id="A",
+                    name="Found",
+                    website="",
+                    url_classification=UrlClassification.NONE,
+                )
+            ]
+
+        def fake_discover(businesses, api_key, cx, *, data_dir, force):
+            stages_called.append("discover")
+            return businesses
+
+        def fake_audit(businesses, api_key, *, force):
+            stages_called.append("audit")
+            return businesses
+
+        def fake_score(businesses):
+            stages_called.append("score")
+            from leadscout.models import Lead, LeadTier
+            for b in businesses:
+                b.lead = Lead(
+                    tier=LeadTier.NO_WEBSITE, score=80,
+                    reasons=["No website found"],
+                )
+            return businesses
+
+        monkeypatch.setattr("leadscout.cli.search_places", fake_search)
+        monkeypatch.setattr("leadscout.cli.discover_urls", fake_discover)
+        monkeypatch.setattr("leadscout.cli.audit_websites", fake_audit)
+        monkeypatch.setattr("leadscout.cli.score_leads", fake_score)
+
+        result = runner.invoke(
+            cli,
+            [
+                "--data-dir", str(tmp_path), "run",
+                "--location", "Test Town, ST",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert stages_called == ["search", "discover", "audit", "score"]
+        # Slugified data file written to disk.
+        assert (tmp_path / "test_town_st.json").exists()
+
+    def test_run_fails_fast_on_missing_env(
+        self, runner, monkeypatch, tmp_path
+    ):
+        # Hard-fail when any required env var is missing rather than
+        # half-running the pipeline.
+        monkeypatch.setenv("GOOGLE_PLACES_API_KEY", "places-key")
+        monkeypatch.delenv("GOOGLE_CUSTOM_SEARCH_API_KEY", raising=False)
+        monkeypatch.delenv("GOOGLE_CUSTOM_SEARCH_CX", raising=False)
+
+        result = runner.invoke(
+            cli,
+            [
+                "--data-dir", str(tmp_path), "run",
+                "--location", "Test Town, ST",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "GOOGLE_CUSTOM_SEARCH_API_KEY" in result.output
+        assert "GOOGLE_CUSTOM_SEARCH_CX" in result.output
+
+    def test_run_force_flag_propagates_to_stages(
+        self, runner, monkeypatch, tmp_path
+    ):
+        # --force should reach both discover_urls and audit_websites.
+        monkeypatch.setenv("GOOGLE_PLACES_API_KEY", "places-key")
+        monkeypatch.setenv("GOOGLE_CUSTOM_SEARCH_API_KEY", "cs-key")
+        monkeypatch.setenv("GOOGLE_CUSTOM_SEARCH_CX", "cs-cx")
+
+        captured: dict = {}
+
+        def fake_search(location, radius, key):
+            return [
+                _make_business(
+                    place_id="A",
+                    url_classification=UrlClassification.NONE,
+                )
+            ]
+
+        def fake_discover(businesses, api_key, cx, *, data_dir, force):
+            captured["discover_force"] = force
+            return businesses
+
+        def fake_audit(businesses, api_key, *, force):
+            captured["audit_force"] = force
+            return businesses
+
+        def fake_score(businesses):
+            from leadscout.models import Lead, LeadTier
+
+            for b in businesses:
+                b.lead = Lead(
+                    tier=LeadTier.NO_WEBSITE, score=80, reasons=[]
+                )
+            return businesses
+
+        monkeypatch.setattr("leadscout.cli.search_places", fake_search)
+        monkeypatch.setattr("leadscout.cli.discover_urls", fake_discover)
+        monkeypatch.setattr("leadscout.cli.audit_websites", fake_audit)
+        monkeypatch.setattr("leadscout.cli.score_leads", fake_score)
+
+        result = runner.invoke(
+            cli,
+            [
+                "--data-dir", str(tmp_path), "run",
+                "--location", "Town, ST", "--force",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert captured["discover_force"] is True
+        assert captured["audit_force"] is True
+
+    def test_run_export_csv_writes_file(
+        self, runner, monkeypatch, tmp_path
+    ):
+        # --export csv at the end of `run` should produce the same
+        # leads_<stem>_<date>.csv file the standalone `score` command does.
+        monkeypatch.setenv("GOOGLE_PLACES_API_KEY", "places-key")
+        monkeypatch.setenv("GOOGLE_CUSTOM_SEARCH_API_KEY", "cs-key")
+        monkeypatch.setenv("GOOGLE_CUSTOM_SEARCH_CX", "cs-cx")
+
+        def fake_search(location, radius, key):
+            return [
+                _make_business(
+                    place_id="A",
+                    name="NoSiteBiz",
+                    url_classification=UrlClassification.NONE,
+                    rating=4.6,
+                )
+            ]
+
+        def fake_discover(businesses, *args, **kwargs):
+            return businesses
+
+        def fake_audit(businesses, *args, **kwargs):
+            return businesses
+
+        def fake_score(businesses):
+            from leadscout.models import Lead, LeadTier
+
+            for b in businesses:
+                b.lead = Lead(
+                    tier=LeadTier.NO_WEBSITE, score=100,
+                    reasons=["No website found"],
+                )
+            return businesses
+
+        monkeypatch.setattr("leadscout.cli.search_places", fake_search)
+        monkeypatch.setattr("leadscout.cli.discover_urls", fake_discover)
+        monkeypatch.setattr("leadscout.cli.audit_websites", fake_audit)
+        monkeypatch.setattr("leadscout.cli.score_leads", fake_score)
+
+        result = runner.invoke(
+            cli,
+            [
+                "--data-dir", str(tmp_path), "run",
+                "--location", "Test Town, ST", "--export", "csv",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        # CSV should be written next to the data file with today's UTC date.
+        csv_files = list(tmp_path.glob("leads_*.csv"))
+        assert len(csv_files) == 1
+        assert "Exported leads to" in result.output

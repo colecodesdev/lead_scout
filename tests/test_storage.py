@@ -5,7 +5,13 @@ import pytest
 
 from leadscout.exceptions import StorageError
 from leadscout.models import Audit, Business, Lead, LeadTier, UrlClassification, UrlSource
-from leadscout.storage import atomic_write_text, load_data, merge_business, save_data
+from leadscout.storage import (
+    atomic_write_text,
+    data_path_for_location,
+    load_data,
+    merge_business,
+    save_data,
+)
 
 
 @pytest.fixture
@@ -296,3 +302,46 @@ class TestAtomicWriteText:
 
         assert target.read_bytes() == original_bytes
         assert list(tmp_path.glob(".leadscout_*.tmp")) == []
+
+
+class TestDataPathForLocation:
+    """Direct contract for the slug helper added in feature 05.
+
+    Used by both the `search` and `run` CLI handlers; pinning it down
+    here so future callers (or tweaks to the slug rules) get caught
+    before they cause silent file-naming drift across pipeline stages.
+    """
+
+    def test_typical_city_state(self):
+        # The case covered in the README / spec examples.
+        result = data_path_for_location(
+            Path("./data"), "Santa Rosa Beach, FL"
+        )
+        assert result == Path("./data/santa_rosa_beach_fl.json")
+
+    def test_collapses_runs_of_punctuation(self):
+        # Multiple non-word chars (commas + spaces, dashes, slashes)
+        # should collapse to a single underscore each.
+        result = data_path_for_location(
+            Path("./data"), "Foo--Bar / Baz, QC"
+        )
+        # "foo--bar / baz, qc" -> "foo_bar_baz_qc" (each non-word run -> _)
+        assert result.name == "foo_bar_baz_qc.json"
+
+    def test_strips_trailing_underscore(self):
+        # A trailing comma or space would otherwise produce a leading
+        # or trailing "_" in the slug.
+        result = data_path_for_location(Path("/tmp"), "Town, ST,")
+        assert result.name == "town_st.json"
+
+    def test_lowercases(self):
+        result = data_path_for_location(Path("/tmp"), "MIXED Case STATE")
+        assert result.name == "mixed_case_state.json"
+
+    def test_uses_provided_data_dir(self):
+        # The data_dir is preserved verbatim (not normalized).
+        result = data_path_for_location(
+            Path("/some/custom/path"), "Anywhere"
+        )
+        assert result.parent == Path("/some/custom/path")
+        assert result.suffix == ".json"
