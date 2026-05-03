@@ -12,6 +12,8 @@ from leadscout.models import LeadTier, UrlClassification, UrlSource
 from leadscout.scoring import (
     csv_path_for_data_file,
     export_to_csv,
+    export_to_markdown,
+    markdown_path_for_data_file,
     rank_leads,
     score_leads,
 )
@@ -344,6 +346,15 @@ def score(ctx, data_file: str, export: str | None) -> None:
     ranked = rank_leads(businesses)
     _print_ranked_summary(ranked)
 
+    # Markdown report is always written. `score` doesn't know the
+    # original location string, so use the data file's stem (slug form,
+    # e.g. "santa_rosa_beach_fl") as the title label. Without this the
+    # default would pull from the *markdown* file's stem, which includes
+    # the "leads_" prefix and date suffix.
+    md_path = markdown_path_for_data_file(path)
+    export_to_markdown(ranked, md_path, location_label=path.stem)
+    click.echo(f"Wrote markdown report to {md_path}")
+
     if export == "csv":
         csv_path = csv_path_for_data_file(path)
         export_to_csv(ranked, csv_path)
@@ -509,6 +520,13 @@ def run(ctx, location: str, radius: int, force: bool, export: str | None) -> Non
 
     ranked = rank_leads(businesses)
     _print_ranked_summary(ranked)
+
+    # Markdown report is always written for `run`. Pass the user's
+    # original location string so the report title reads
+    # "Santa Rosa Beach, FL" instead of "santa_rosa_beach_fl".
+    md_path = markdown_path_for_data_file(path)
+    export_to_markdown(ranked, md_path, location_label=location)
+    click.echo(f"Wrote markdown report to {md_path}")
 
     if export == "csv":
         csv_path = csv_path_for_data_file(path)

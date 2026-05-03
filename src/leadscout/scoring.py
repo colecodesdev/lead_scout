@@ -343,3 +343,126 @@ def csv_path_for_data_file(data_file: Path) -> Path:
     """
     today = datetime.now(timezone.utc).date().isoformat()
     return data_file.parent / f"leads_{data_file.stem}_{today}.csv"
+
+
+# ---------------------------------------------------------------------------
+# Markdown export.
+# ---------------------------------------------------------------------------
+
+
+# Tier display order in the summary table. Matches the human-meaningful
+# priority: best leads first, skip last.
+_TIER_DISPLAY_ORDER = (
+    LeadTier.NO_WEBSITE,
+    LeadTier.FAILING_AUDIT,
+    LeadTier.MISSING_FEATURES,
+    LeadTier.SKIP,
+)
+
+
+def export_to_markdown(
+    businesses: list[Business],
+    path: Path,
+    *,
+    location_label: str | None = None,
+) -> None:
+    """Write ranked leads to a human-readable markdown file at `path`.
+
+    Always-on for the score / run CLI commands (per the request: "format
+    each run's output into an easy-to-read markdown file"). CSV remains
+    opt-in for spreadsheet import; markdown is the report you actually
+    read when deciding who to contact.
+
+    Format: a short header (location + date + totals), a tier-count
+    summary table, and a per-business detail section ordered by score
+    descending. Skip-tier entries are excluded (no lead value), matching
+    CSV behavior; the tier summary still counts them so the reader sees
+    the full scan picture.
+
+    location_label is the friendly title shown at the top. Pass the
+    user's original location string when calling from `run`; falls back
+    to the data file's stem (slug form) when called from `score`.
+    """
+    leads = [
+        b
+        for b in businesses
+        if b.lead is not None and b.lead.tier != LeadTier.SKIP
+    ]
+    leads.sort(key=lambda b: b.lead.score, reverse=True)
+
+    # Tier counts including skip so the summary line tells the full story.
+    tier_counts: dict[str, int] = {}
+    for b in businesses:
+        if b.lead is None:
+            continue
+        tier_counts[b.lead.tier.value] = (
+            tier_counts.get(b.lead.tier.value, 0) + 1
+        )
+
+    today = datetime.now(timezone.utc).date().isoformat()
+    title = location_label or path.stem
+
+    lines: list[str] = []
+    # Header. Two trailing spaces on metadata lines force markdown line
+    # breaks so each "**Label:**" sits on its own line in rendered view.
+    lines.append(f"# LeadScout: {title}")
+    lines.append("")
+    lines.append(f"**Scan date:** {today} (UTC)  ")
+    lines.append(f"**Total businesses scanned:** {len(businesses)}  ")
+    lines.append(f"**Active leads (above skip tier):** {len(leads)}")
+    lines.append("")
+
+    # Tier summary table. Iterate in display order, defaulting absent
+    # tiers to 0 so the table is consistent even on partial scans.
+    lines.append("| Tier | Count |")
+    lines.append("| --- | --- |")
+    for tier in _TIER_DISPLAY_ORDER:
+        lines.append(f"| {tier.value} | {tier_counts.get(tier.value, 0)} |")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append("## Active leads")
+    lines.append("")
+
+    if not leads:
+        lines.append("_No leads above skip tier._")
+    else:
+        for rank, biz in enumerate(leads, start=1):
+            lead = biz.lead
+            assert lead is not None  # filtered above
+            # Heading combines rank, name, score, tier so a reader can
+            # scan the document via the table-of-contents in any
+            # markdown viewer.
+            lines.append(
+                f"### {rank}. {biz.name} — score {lead.score} — `{lead.tier.value}`"
+            )
+            lines.append("")
+            # Use em-dash placeholder for empty fields so missing data is
+            # visually distinct from "we found this and it's empty".
+            rating_display = (
+                f"{biz.rating}" if biz.rating is not None else "—"
+            )
+            lines.append(f"- **Address:** {biz.address or '—'}")
+            lines.append(f"- **Phone:** {biz.phone or '—'}")
+            lines.append(f"- **Website:** {biz.website or '—'}")
+            lines.append(f"- **Rating:** {rating_display}")
+            lines.append("- **Why it's a lead:**")
+            for reason in lead.reasons:
+                lines.append(f"  - {reason}")
+            lines.append("")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Trailing newline for clean POSIX-style file end.
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    logger.info("Exported %d ranked leads to %s", len(leads), path)
+
+
+def markdown_path_for_data_file(data_file: Path) -> Path:
+    """Derive the markdown report path from a data file path.
+
+    `data/santa_rosa_beach_fl.json` -> `data/leads_santa_rosa_beach_fl_2026-05-03.md`.
+    Same naming pattern as `csv_path_for_data_file`; the two outputs
+    sit next to each other in the data dir for the same scan.
+    """
+    today = datetime.now(timezone.utc).date().isoformat()
+    return data_file.parent / f"leads_{data_file.stem}_{today}.md"

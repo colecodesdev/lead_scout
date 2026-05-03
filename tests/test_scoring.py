@@ -32,6 +32,8 @@ from leadscout.scoring import (
     _is_failing_audit,
     csv_path_for_data_file,
     export_to_csv,
+    export_to_markdown,
+    markdown_path_for_data_file,
     rank_leads,
     score_leads,
 )
@@ -517,3 +519,107 @@ class TestCsvPathForDataFile:
         assert result.parent == Path("data")
         assert result.name.startswith("leads_santa_rosa_beach_fl_")
         assert result.suffix == ".csv"
+
+
+# ---------------------------------------------------------------------------
+# Markdown export
+# ---------------------------------------------------------------------------
+
+
+class TestExportToMarkdown:
+    def test_writes_header_and_summary_table(self, tmp_path):
+        # Spec: header includes location label, scan date, totals;
+        # tier table lists every tier with its count.
+        no_site = _make_business(
+            place_id="A",
+            name="NoSiteBiz",
+            url_classification=UrlClassification.NONE,
+            audit=None,
+        )
+        clean = _make_business(place_id="B", name="CleanBiz", audit=_passing_audit())
+        score_leads([no_site, clean])
+
+        path = tmp_path / "report.md"
+        export_to_markdown(
+            [no_site, clean], path, location_label="Test City, ST"
+        )
+
+        text = path.read_text(encoding="utf-8")
+        assert "# LeadScout: Test City, ST" in text
+        assert "Total businesses scanned:** 2" in text
+        # Active leads excludes skip-tier; only NoSiteBiz qualifies.
+        assert "Active leads (above skip tier):** 1" in text
+        # Tier table lists every tier in display order.
+        assert "| no_website | 1 |" in text
+        assert "| failing_audit | 0 |" in text
+        assert "| missing_features | 0 |" in text
+        assert "| skip | 1 |" in text
+
+    def test_lists_active_leads_with_full_detail(self, tmp_path):
+        biz = _make_business(
+            place_id="A",
+            name="The Cafe",
+            address="100 Main St",
+            phone="555-0000",
+            website="",
+            rating=4.6,
+            url_classification=UrlClassification.NONE,
+            audit=None,
+        )
+        score_leads([biz])
+        path = tmp_path / "report.md"
+        export_to_markdown([biz], path)
+
+        text = path.read_text(encoding="utf-8")
+        # Heading uses rank, name, score, tier.
+        assert "### 1. The Cafe — score 100 — `no_website`" in text
+        # Per-business detail bullets.
+        assert "- **Address:** 100 Main St" in text
+        assert "- **Phone:** 555-0000" in text
+        # Empty website shown as em-dash placeholder, not blank.
+        assert "- **Website:** —" in text
+        assert "- **Rating:** 4.6" in text
+        # Reasons listed under nested bullets.
+        assert "  - No website found" in text
+
+    def test_skip_tier_excluded_from_active_leads_section(self, tmp_path):
+        # Skip-tier businesses count in the tier-summary table but don't
+        # get individual entries in the Active leads section.
+        skip = _make_business(
+            place_id="A", name="CleanBiz", audit=_passing_audit()
+        )
+        score_leads([skip])
+        path = tmp_path / "report.md"
+        export_to_markdown([skip], path)
+
+        text = path.read_text(encoding="utf-8")
+        # No detail section for the skipped business.
+        assert "### 1. CleanBiz" not in text
+        # The empty-state line shows up.
+        assert "_No leads above skip tier._" in text
+        # Tier summary still counts it.
+        assert "| skip | 1 |" in text
+
+    def test_falls_back_to_path_stem_when_no_label(self, tmp_path):
+        # When the caller doesn't pass location_label (e.g., `score`
+        # CLI subcommand), the title falls back to the file's stem.
+        biz = _make_business(
+            url_classification=UrlClassification.NONE, audit=None
+        )
+        score_leads([biz])
+        path = tmp_path / "santa_rosa_beach_fl_report.md"
+        export_to_markdown([biz], path)
+
+        text = path.read_text(encoding="utf-8")
+        assert "# LeadScout: santa_rosa_beach_fl_report" in text
+
+
+class TestMarkdownPathForDataFile:
+    def test_filename_format(self):
+        # `data/foo.json` -> `data/leads_foo_<today>.md`
+        result = markdown_path_for_data_file(
+            Path("data/santa_rosa_beach_fl.json")
+        )
+        assert result.parent == Path("data")
+        assert result.name.startswith("leads_santa_rosa_beach_fl_")
+        assert result.suffix == ".md"
