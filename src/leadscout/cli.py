@@ -6,7 +6,9 @@ from pathlib import Path
 import click
 
 from leadscout.config import DEFAULT_RADIUS
+from leadscout.discovery import discover_urls
 from leadscout.exceptions import APIError, LeadScoutError
+from leadscout.models import UrlClassification, UrlSource
 from leadscout.search import search_places
 from leadscout.storage import load_data, merge_business, save_data
 
@@ -121,10 +123,89 @@ def search(ctx, location: str, radius: int) -> None:
 
 
 @cli.command()
+@click.option(
+    "--data-file",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Path to a JSON file produced by `search`.",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Re-search even for businesses that already have a URL.",
+)
 @click.pass_context
-def discover(ctx) -> None:
+def discover(ctx, data_file: str, force: bool) -> None:
     """Discover and classify website URLs for businesses."""
-    click.echo("Not yet implemented.")
+    # Both env vars are required: the API key authenticates the request,
+    # the CX (custom search engine ID) selects which programmable search
+    # engine to query against. They're separate per spec convention.
+    api_key = os.environ.get("GOOGLE_CUSTOM_SEARCH_API_KEY")
+    cx = os.environ.get("GOOGLE_CUSTOM_SEARCH_CX")
+    if not api_key or not cx:
+        click.echo(
+            "Error: GOOGLE_CUSTOM_SEARCH_API_KEY and GOOGLE_CUSTOM_SEARCH_CX "
+            "must both be set in the environment.",
+            err=True,
+        )
+        ctx.exit(1)
+
+    # Load whatever the search step (or a previous discover run) wrote.
+    path = Path(data_file)
+    businesses = load_data(path)
+    if not businesses:
+        # Empty file is not an error; just nothing to do. Echo a hint
+        # so the user knows to run `search` first if they expected data.
+        click.echo(f"No businesses in {path}; run `search` first.")
+        return
+
+    # Quota tracker lives in --data-dir (default ./data), not next to
+    # --data-file. This way a single quota counter is shared across all
+    # location files for the day.
+    data_dir = Path(ctx.obj["data_dir"])
+
+    try:
+        updated = discover_urls(
+            businesses, api_key, cx, data_dir=data_dir, force=force
+        )
+    except APIError as e:
+        click.echo(f"Error: {e}", err=True)
+        ctx.exit(1)
+    except LeadScoutError as e:
+        click.echo(f"Unexpected LeadScout error: {e}", err=True)
+        ctx.exit(1)
+
+    # Persist updated classifications/URLs back to the same file.
+    save_data(path, updated)
+
+    # Summary line: counts by source and classification so the user has
+    # a quick view of what changed without reading the JSON.
+    total = len(updated)
+    discovered = sum(
+        1 for b in updated if b.url_source == UrlSource.SEARCH_DISCOVERED
+    )
+    no_url = sum(1 for b in updated if b.url_source == UrlSource.NONE)
+    official = sum(
+        1
+        for b in updated
+        if b.url_classification == UrlClassification.OFFICIAL_SITE
+    )
+    social = sum(
+        1
+        for b in updated
+        if b.url_classification == UrlClassification.SOCIAL_MEDIA
+    )
+    directory = sum(
+        1
+        for b in updated
+        if b.url_classification == UrlClassification.DIRECTORY_LISTING
+    )
+    click.echo(
+        f"{total} businesses processed: {discovered} URLs discovered, "
+        f"{no_url} still without URL. "
+        f"Classifications: {official} official, {social} social, "
+        f"{directory} directory."
+    )
 
 
 @cli.command()

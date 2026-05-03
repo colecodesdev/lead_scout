@@ -1,0 +1,26 @@
+{
+  "kind": "customsearch#search",
+  "items": [
+    {
+      "kind": "customsearch#result",
+      "title": "Acme Plumbing Supplies",
+      "link": "https://acmeplumbing.example.com/",
+      "displayLink": "acmeplumbing.example.com",
+      "snippet": "Wholesale plumbing supplies for contractors."
+    },
+    {
+      "kind": "customsearch#result",
+      "title": "Northeast Dental Group",
+      "link": "https://northeastdental.example.com/",
+      "displayLink": "northeastdental.example.com",
+      "snippet": "Family dentistry in upstate New York."
+    },
+    {
+      "kind": "customsearch#result",
+      "title": "Vintage Vinyl Records",
+      "link": "https://vintagevinyl.example.com/",
+      "displayLink": "vintagevinyl.example.com",
+      "snippet": "Rare LPs and audiophile gear."
+    }
+  ]
+}

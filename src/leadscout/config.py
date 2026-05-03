@@ -24,6 +24,48 @@ HTTP_TIMEOUT = 30
 # Default search radius in meters for Google Places nearby search
 DEFAULT_RADIUS = 5000
 
+# --- URL discovery & classification (feature 03) ---
+# Domains that classify as social-media presence (not an owned site).
+# Substring match against the URL's netloc (subdomain-tolerant).
+# frozenset because it's read-only and gives O(1) membership; using it
+# here makes intent obvious ("this is a fixed lookup table, not a list
+# we mutate elsewhere").
+SOCIAL_MEDIA_DOMAINS = frozenset({
+    "facebook.com",
+    "instagram.com",
+    "twitter.com",
+    "x.com",
+    "tiktok.com",
+})
+# Third-party listing/aggregator domains. Restaurants on these are
+# present-but-not-in-control: still treated as "no real website" for
+# scoring purposes, just with a different reason.
+DIRECTORY_DOMAINS = frozenset({
+    "yelp.com",
+    "tripadvisor.com",
+    "grubhub.com",
+    "doordash.com",
+    "ubereats.com",
+    "opentable.com",
+    "yellowpages.com",
+})
+# rapidfuzz token_sort_ratio threshold (0-100). 70 is intentionally
+# permissive: this is a lead list for human review, false positives are
+# cheap, false negatives waste a pitch (you contact a business that
+# already has a website).
+FUZZY_MATCH_THRESHOLD = 70
+
+# --- Custom Search free-tier quota (feature 03) ---
+# Google Custom Search has a HARD daily cap of 100 queries on the free
+# tier. No billing fallback: past 100, the API just returns 429 until
+# UTC midnight. We track usage on disk and refuse to issue more queries
+# than CUSTOM_SEARCH_SAFE_LIMIT in any UTC day, leaving a safety margin
+# below the actual cap to absorb concurrent invocations and any drift
+# between our counter and Google's.
+CUSTOM_SEARCH_DAILY_LIMIT = 100  # Google's hard cap; informational only
+CUSTOM_SEARCH_SAFE_LIMIT = 95  # Our hard stop; 5-query margin for safety
+CUSTOM_SEARCH_WARN_THRESHOLD = 80  # Log a warning at/after this count
+
 # --- Lead scoring weights ---
 # Each key maps a deficiency to the points it adds to a business's lead score.
 # Higher score = better lead (more likely to need a website or improvements).

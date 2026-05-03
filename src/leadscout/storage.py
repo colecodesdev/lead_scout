@@ -55,36 +55,63 @@ def load_data(path: Path) -> list[Business]:
         raise StorageError(f"Failed to load data from {path}: {e}") from e
 
 
-def save_data(path: Path, businesses: list[Business]) -> None:
-    """Save a list of Business objects to a JSON file using atomic write.
+def atomic_write_text(path: Path, text: str) -> None:
+    """Write text to a file atomically (temp file + rename strategy).
 
-    Creates the parent directory if it doesn't exist. Uses a temp file +
-    rename strategy so a crash mid-write won't leave a corrupt file.
+    Public helper used wherever we need to write a small text file
+    without risking a half-written file on crash. Creates the parent
+    directory if it doesn't already exist.
+
+    Used by save_data (for the businesses JSON) and by feature 03's
+    QuotaTracker (for the per-day Custom Search counter).
     """
-    # Ensure the data directory exists (no-op if it already does)
+    # Ensure the destination directory exists. parents=True creates any
+    # missing intermediate dirs; exist_ok=True makes this a no-op when
+    # the dir is already there.
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Convert dataclass instances to plain dicts for JSON serialization
-    data = [asdict(b) for b in businesses]
     try:
-        # Create a temp file in the same directory as the target. This is
-        # important because rename/replace only works atomically within the
-        # same filesystem.
-        fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp", prefix=".leadscout_")
+        # mkstemp creates a temp file IN THE SAME DIRECTORY as the target.
+        # This is crucial: Path.replace() (the atomic-rename step below)
+        # only works atomically on the same filesystem, and tmp_path on a
+        # different mount would silently degrade to a non-atomic copy.
+        fd, tmp_path = tempfile.mkstemp(
+            dir=path.parent, suffix=".tmp", prefix=".leadscout_"
+        )
         try:
-            # Write JSON to the temp file. Using the fd (file descriptor)
-            # returned by mkstemp so we don't leak the handle.
+            # Wrap the file descriptor returned by mkstemp in a normal
+            # `with open(fd, ...)` so the handle is closed even on error.
+            # If we used the path with `open(tmp_path, "w")` the fd would
+            # leak.
             with open(fd, "w", encoding="utf-8") as f:
-                json.dump(data, f, cls=_EnumEncoder, indent=2)
-            # Atomic replace: on success, the target file instantly switches
-            # from old content to new. Path.replace() works across platforms.
+                f.write(text)
+            # Atomic replace: on POSIX this is rename(2); on Windows
+            # MoveFileExW with MOVEFILE_REPLACE_EXISTING. Either way, the
+            # target file instantly flips from old content to new.
             Path(tmp_path).replace(path)
         except BaseException:
-            # If anything fails (encoding error, disk full, etc.), clean up
-            # the temp file so we don't leave orphan .tmp files around
+            # Anything goes wrong (write error, disk full, KeyboardInterrupt),
+            # clean up the temp file so we don't leave .leadscout_*.tmp
+            # orphans. missing_ok=True so unlink doesn't raise if Path.replace
+            # already moved the file (race-free cleanup).
             Path(tmp_path).unlink(missing_ok=True)
             raise
     except OSError as e:
-        raise StorageError(f"Failed to save data to {path}: {e}") from e
+        # Only OSErrors get wrapped; other exceptions (e.g. JSON encoder
+        # errors at the call site) propagate as themselves.
+        raise StorageError(f"Failed to atomically write {path}: {e}") from e
+
+
+def save_data(path: Path, businesses: list[Business]) -> None:
+    """Save a list of Business objects to a JSON file using atomic write."""
+    # Convert dataclass instances to plain dicts. asdict recurses into
+    # nested dataclasses (Audit, Lead) and tuples them out as dicts.
+    data = [asdict(b) for b in businesses]
+    # Serialize first, then hand the text to atomic_write_text. Doing
+    # the serialization outside the helper means encoder errors raise
+    # cleanly as TypeError (or similar) rather than being wrapped in
+    # StorageError, which keeps debugging direct.
+    text = json.dumps(data, cls=_EnumEncoder, indent=2)
+    atomic_write_text(path, text)
     logger.info("Saved %d businesses to %s", len(businesses), path)
 
 

@@ -5,7 +5,7 @@ import pytest
 
 from leadscout.exceptions import StorageError
 from leadscout.models import Audit, Business, Lead, LeadTier, UrlClassification, UrlSource
-from leadscout.storage import load_data, merge_business, save_data
+from leadscout.storage import atomic_write_text, load_data, merge_business, save_data
 
 
 @pytest.fixture
@@ -176,3 +176,50 @@ class TestAtomicWrite:
         # And no .leadscout_*.tmp orphans left in the directory.
         leftovers = list(data_file.parent.glob(".leadscout_*.tmp"))
         assert leftovers == []
+
+
+class TestAtomicWriteText:
+    """Direct tests for the public atomic_write_text helper.
+
+    save_data exercises this function indirectly, but feature 03's
+    QuotaTracker is a second caller and any future caller deserves a
+    locked-down contract independent of the JSON-list use case.
+    """
+
+    def test_creates_parent_directory(self, tmp_path):
+        # Target path's parent doesn't exist yet; the helper should
+        # mkdir -p before writing.
+        target = tmp_path / "nested" / "deeper" / "out.txt"
+        assert not target.parent.exists()
+        atomic_write_text(target, "hello")
+        assert target.read_text(encoding="utf-8") == "hello"
+
+    def test_overwrites_existing_file(self, tmp_path):
+        # Calling the helper on a file that already exists replaces
+        # its contents atomically (rename-over).
+        target = tmp_path / "x.txt"
+        target.write_text("old")
+        atomic_write_text(target, "new")
+        assert target.read_text(encoding="utf-8") == "new"
+
+    def test_failed_rename_preserves_existing_and_cleans_temp(
+        self, tmp_path, monkeypatch
+    ):
+        # If the rename step fails after the temp file has been written,
+        # the existing target must be untouched and the .leadscout_*.tmp
+        # file must be removed. Mirrors the save_data failure test but
+        # exercises atomic_write_text directly.
+        target = tmp_path / "x.txt"
+        target.write_text("preserve me")
+        original_bytes = target.read_bytes()
+
+        def boom(self, _other):
+            raise OSError("simulated rename failure")
+
+        monkeypatch.setattr(Path, "replace", boom)
+
+        with pytest.raises(StorageError):
+            atomic_write_text(target, "this should not land")
+
+        assert target.read_bytes() == original_bytes
+        assert list(tmp_path.glob(".leadscout_*.tmp")) == []

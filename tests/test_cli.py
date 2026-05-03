@@ -1,9 +1,11 @@
-"""Tests for the search subcommand handler in cli.py.
+"""Tests for the search & discover subcommand handlers in cli.py.
 
 We use Click's CliRunner to invoke the command exactly as a user would,
-without spawning a real subprocess. search_places is monkeypatched to a
-stub so we exercise the handler's logic (env reading, error formatting,
-slug derivation, merge+save) in isolation from the HTTP layer.
+without spawning a real subprocess. The service functions
+(search_places, discover_urls) are monkeypatched to stubs so we
+exercise the handler's logic (env reading, error formatting, slug
+derivation, merge+save, summary output) in isolation from the HTTP
+layer.
 """
 
 from datetime import datetime, timezone
@@ -14,7 +16,7 @@ from click.testing import CliRunner
 from leadscout.cli import cli
 from leadscout.exceptions import APIError
 from leadscout.models import Business, UrlClassification, UrlSource
-from leadscout.storage import load_data
+from leadscout.storage import load_data, save_data
 
 
 def _make_business(**overrides) -> Business:
@@ -155,3 +157,131 @@ class TestSearchCommand:
         assert result.exit_code != 0
         # The APIError message text should appear in the output verbatim.
         assert "Geocoding returned no results" in result.output
+
+
+class TestDiscoverCommand:
+    def _seed_data_file(self, tmp_path) -> str:
+        """Write a small businesses JSON to disk and return its path."""
+        path = tmp_path / "leads.json"
+        save_data(
+            path,
+            [
+                _make_business(
+                    place_id="A",
+                    name="Alpha",
+                    website="",
+                    url_source=UrlSource.NONE,
+                    url_classification=UrlClassification.NONE,
+                ),
+                _make_business(
+                    place_id="B",
+                    name="Beta",
+                    website="https://www.facebook.com/beta",
+                    url_source=UrlSource.GOOGLE_PLACES,
+                    url_classification=UrlClassification.OFFICIAL_SITE,
+                ),
+            ],
+        )
+        return str(path)
+
+    def test_missing_env_vars_exit_with_error(
+        self, runner, monkeypatch, tmp_path
+    ):
+        # Both Custom Search vars must be present; missing either should
+        # produce a clear error.
+        monkeypatch.delenv("GOOGLE_CUSTOM_SEARCH_API_KEY", raising=False)
+        monkeypatch.delenv("GOOGLE_CUSTOM_SEARCH_CX", raising=False)
+
+        data_file = self._seed_data_file(tmp_path)
+        result = runner.invoke(
+            cli,
+            ["--data-dir", str(tmp_path), "discover", "--data-file", data_file],
+        )
+
+        assert result.exit_code != 0
+        assert "GOOGLE_CUSTOM_SEARCH_API_KEY" in result.output
+
+    def test_happy_path_calls_discover_urls_and_saves(
+        self, runner, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("GOOGLE_CUSTOM_SEARCH_API_KEY", "fake")
+        monkeypatch.setenv("GOOGLE_CUSTOM_SEARCH_CX", "fake-cx")
+
+        data_file = self._seed_data_file(tmp_path)
+
+        # Stub discover_urls to mutate the input list (simulates a real
+        # discovery for "Alpha" + reclassification of "Beta").
+        def fake_discover(businesses, api_key, cx, *, data_dir, force):
+            for b in businesses:
+                if b.place_id == "A":
+                    b.website = "https://alpha.example.com"
+                    b.url_source = UrlSource.SEARCH_DISCOVERED
+                    b.url_classification = UrlClassification.OFFICIAL_SITE
+                elif b.place_id == "B":
+                    b.url_classification = UrlClassification.SOCIAL_MEDIA
+            return businesses
+
+        monkeypatch.setattr("leadscout.cli.discover_urls", fake_discover)
+
+        result = runner.invoke(
+            cli,
+            ["--data-dir", str(tmp_path), "discover", "--data-file", data_file],
+        )
+
+        assert result.exit_code == 0, result.output
+        # Summary line should reflect the changes.
+        assert "1 URLs discovered" in result.output
+        # Reload from disk to confirm save_data was called with the
+        # mutated list.
+        loaded = load_data(tmp_path / "leads.json")
+        by_id = {b.place_id: b for b in loaded}
+        assert by_id["A"].url_source == UrlSource.SEARCH_DISCOVERED
+        assert by_id["B"].url_classification == UrlClassification.SOCIAL_MEDIA
+
+    def test_force_flag_propagates(self, runner, monkeypatch, tmp_path):
+        monkeypatch.setenv("GOOGLE_CUSTOM_SEARCH_API_KEY", "fake")
+        monkeypatch.setenv("GOOGLE_CUSTOM_SEARCH_CX", "fake-cx")
+
+        data_file = self._seed_data_file(tmp_path)
+        captured: dict = {}
+
+        def fake_discover(businesses, api_key, cx, *, data_dir, force):
+            captured["force"] = force
+            return businesses
+
+        monkeypatch.setattr("leadscout.cli.discover_urls", fake_discover)
+
+        runner.invoke(
+            cli,
+            [
+                "--data-dir",
+                str(tmp_path),
+                "discover",
+                "--data-file",
+                data_file,
+                "--force",
+            ],
+        )
+
+        assert captured["force"] is True
+
+    def test_apierror_surfaces_as_user_message(
+        self, runner, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("GOOGLE_CUSTOM_SEARCH_API_KEY", "fake")
+        monkeypatch.setenv("GOOGLE_CUSTOM_SEARCH_CX", "fake-cx")
+
+        data_file = self._seed_data_file(tmp_path)
+
+        def boom(*args, **kwargs):
+            raise APIError("Custom Search auth failure (HTTP 401)")
+
+        monkeypatch.setattr("leadscout.cli.discover_urls", boom)
+
+        result = runner.invoke(
+            cli,
+            ["--data-dir", str(tmp_path), "discover", "--data-file", data_file],
+        )
+
+        assert result.exit_code != 0
+        assert "auth failure" in result.output

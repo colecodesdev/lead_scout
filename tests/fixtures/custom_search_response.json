@@ -1,0 +1,33 @@
+{
+  "kind": "customsearch#search",
+  "items": [
+    {
+      "kind": "customsearch#result",
+      "title": "Coastal Catch | Fresh Seafood in Santa Rosa Beach",
+      "link": "https://coastalcatch.example.com/",
+      "displayLink": "coastalcatch.example.com",
+      "snippet": "Coastal Catch serves the freshest Gulf seafood in 30A..."
+    },
+    {
+      "kind": "customsearch#result",
+      "title": "Coastal Catch - Facebook",
+      "link": "https://www.facebook.com/coastalcatch30a",
+      "displayLink": "www.facebook.com",
+      "snippet": "Coastal Catch on Facebook"
+    },
+    {
+      "kind": "customsearch#result",
+      "title": "Coastal Catch | Yelp",
+      "link": "https://www.yelp.com/biz/coastal-catch-santa-rosa-beach",
+      "displayLink": "www.yelp.com",
+      "snippet": "Coastal Catch reviews on Yelp"
+    },
+    {
+      "kind": "customsearch#result",
+      "title": "Best Beach Bars in 30A",
+      "link": "https://random-blog.example/30a-bars",
+      "displayLink": "random-blog.example",
+      "snippet": "Roundup of beach bars including Coastal Catch."
+    }
+  ]
+}
