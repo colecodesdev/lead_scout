@@ -42,27 +42,71 @@ class LeadTier(StrEnum):
 
 @dataclass
 class Audit:
-    """Results from auditing a business's website (PageSpeed + Playwright)."""
+    """Results from auditing a business's website.
 
-    performance_score: float | None = None
-    accessibility_score: float | None = None
-    best_practices_score: float | None = None
-    is_mobile_friendly: bool | None = None
-    has_ssl: bool | None = None
-    load_time_ms: int | None = None
-    # Feature checks done via Playwright DOM inspection
-    has_menu_page: bool = False
-    has_online_ordering: bool = False
-    has_reservation_system: bool = False
+    Populated by feature 04 (audit). Two layers feed this:
+
+    1. PageSpeed Insights (remote Lighthouse): runs once for `mobile`
+       and once for `desktop`; each populates a dict of category scores
+       (performance / accessibility / seo / best_practices, 0-100).
+    2. Playwright DOM checks (local headless browser at iPhone viewport):
+       boolean checks for menu/hours/contact/viewport/SSL/online-ordering/
+       reservations, plus load timing and broken-asset collection.
+
+    `deficiencies` is a list of plain-English strings derived from the
+    bool/score fields; it's what the scoring step (feature 05) consumes
+    rather than re-deriving from the raw fields.
+    """
+
+    # PageSpeed Insights (Lighthouse) results, keyed by strategy.
+    # Each dict has shape: {"performance": 0-100, "accessibility": 0-100,
+    # "seo": 0-100, "best_practices": 0-100}. None if PSI failed.
+    lighthouse_mobile: dict | None = None
+    lighthouse_desktop: dict | None = None
+
+    # Playwright DOM checks. All default False so a partial audit
+    # (e.g., site blocked by Cloudflare) still serializes cleanly.
+    has_menu: bool = False
+    has_hours: bool = False
     has_contact_info: bool = False
-    # Raw API response stored for debugging and re-analysis
-    raw_results: dict | None = None
+    has_mobile_viewport: bool = False
+    has_ssl: bool = False
+    has_online_ordering: bool = False
+    has_reservation: bool = False
+
+    # Wall-clock seconds from page.goto() start to networkidle.
+    # None on timeout / Cloudflare block / any navigation failure.
+    load_time_seconds: float | None = None
+
+    # Asset requests that returned 4xx/5xx during page load.
+    # Each entry: {"url": str, "status": int, "type": "image"|"script"|"stylesheet"|"other"}.
+    # Captured via page.on("response") listener registered before goto.
+    broken_assets: list[dict] = field(default_factory=list)
+
+    # Plain-English deficiencies produced by the audit. Stable strings
+    # so feature 05 can match on them ("No menu page found", "Mobile
+    # performance score: 23/100", "No SSL certificate", "3 broken images").
+    deficiencies: list[str] = field(default_factory=list)
+
+    # When the audit ran (UTC). Used by the 7-day skip window.
+    # Same shape and serialization as Business.last_scanned.
+    audited_at: datetime | None = None
 
     @classmethod
     def from_dict(cls, data: dict) -> "Audit":
-        # Filter to only keys that match dataclass fields, so extra/unknown
-        # keys in stored JSON don't cause TypeErrors on construction
-        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+        # Shallow copy so the caller's dict isn't mutated by the pop()s
+        # below. Same defensive pattern as Business.from_dict.
+        payload = dict(data)
+        # Parse audited_at (ISO-8601 string -> tz-aware datetime).
+        # Pop so it doesn't collide with the explicit kwarg.
+        scanned_raw = payload.pop("audited_at", None)
+        audited_at = (
+            datetime.fromisoformat(scanned_raw) if scanned_raw else None
+        )
+        # Filter to only known fields so unknown JSON keys don't trip
+        # the cls(**...) call. Same defensive pattern Business uses.
+        filtered = {k: v for k, v in payload.items() if k in cls.__dataclass_fields__}
+        return cls(**filtered, audited_at=audited_at)
 
 
 @dataclass

@@ -285,3 +285,138 @@ class TestDiscoverCommand:
 
         assert result.exit_code != 0
         assert "auth failure" in result.output
+
+
+class TestAuditCommand:
+    def _seed_data_file(self, tmp_path) -> str:
+        path = tmp_path / "leads.json"
+        save_data(
+            path,
+            [
+                _make_business(
+                    place_id="A",
+                    name="Alpha",
+                    website="https://alpha.example.com",
+                    url_classification=UrlClassification.OFFICIAL_SITE,
+                ),
+                _make_business(
+                    place_id="B",
+                    name="Beta",
+                    website="https://www.facebook.com/beta",
+                    url_classification=UrlClassification.SOCIAL_MEDIA,
+                ),
+            ],
+        )
+        return str(path)
+
+    def test_uses_pagespeed_key_when_set(self, runner, monkeypatch, tmp_path):
+        # GOOGLE_PAGESPEED_API_KEY takes precedence over PLACES key.
+        monkeypatch.setenv("GOOGLE_PAGESPEED_API_KEY", "psi-key")
+        monkeypatch.setenv("GOOGLE_PLACES_API_KEY", "places-key")
+        captured: dict = {}
+
+        def fake_audit(businesses, api_key, *, force):
+            captured["api_key"] = api_key
+            return businesses
+
+        monkeypatch.setattr("leadscout.cli.audit_websites", fake_audit)
+        data_file = self._seed_data_file(tmp_path)
+
+        result = runner.invoke(
+            cli,
+            ["--data-dir", str(tmp_path), "audit", "--data-file", data_file],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert captured["api_key"] == "psi-key"
+
+    def test_falls_back_to_places_key_when_psi_unset(
+        self, runner, monkeypatch, tmp_path
+    ):
+        monkeypatch.delenv("GOOGLE_PAGESPEED_API_KEY", raising=False)
+        monkeypatch.setenv("GOOGLE_PLACES_API_KEY", "places-key")
+        captured: dict = {}
+
+        def fake_audit(businesses, api_key, *, force):
+            captured["api_key"] = api_key
+            return businesses
+
+        monkeypatch.setattr("leadscout.cli.audit_websites", fake_audit)
+        data_file = self._seed_data_file(tmp_path)
+
+        runner.invoke(
+            cli,
+            ["--data-dir", str(tmp_path), "audit", "--data-file", data_file],
+        )
+        assert captured["api_key"] == "places-key"
+
+    def test_unauthenticated_when_no_keys_set(
+        self, runner, monkeypatch, tmp_path
+    ):
+        monkeypatch.delenv("GOOGLE_PAGESPEED_API_KEY", raising=False)
+        monkeypatch.delenv("GOOGLE_PLACES_API_KEY", raising=False)
+        captured: dict = {}
+
+        def fake_audit(businesses, api_key, *, force):
+            captured["api_key"] = api_key
+            return businesses
+
+        monkeypatch.setattr("leadscout.cli.audit_websites", fake_audit)
+        data_file = self._seed_data_file(tmp_path)
+
+        result = runner.invoke(
+            cli,
+            ["--data-dir", str(tmp_path), "audit", "--data-file", data_file],
+        )
+        # api_key should be None (unauthenticated).
+        assert captured["api_key"] is None
+        # Heads-up message should mention the lower quota.
+        assert "unauthenticated" in result.output
+
+    def test_force_flag_propagates(self, runner, monkeypatch, tmp_path):
+        monkeypatch.setenv("GOOGLE_PAGESPEED_API_KEY", "fake")
+        captured: dict = {}
+
+        def fake_audit(businesses, api_key, *, force):
+            captured["force"] = force
+            return businesses
+
+        monkeypatch.setattr("leadscout.cli.audit_websites", fake_audit)
+        data_file = self._seed_data_file(tmp_path)
+
+        runner.invoke(
+            cli,
+            [
+                "--data-dir", str(tmp_path), "audit",
+                "--data-file", data_file, "--force",
+            ],
+        )
+        assert captured["force"] is True
+
+    def test_audit_summary_reports_counts(self, runner, monkeypatch, tmp_path):
+        # Stub audit_websites to attach a populated Audit so we can verify
+        # the summary line tallies audited count + deficiencies correctly.
+        monkeypatch.setenv("GOOGLE_PAGESPEED_API_KEY", "fake")
+
+        from leadscout.models import Audit
+
+        def fake_audit(businesses, api_key, *, force):
+            for b in businesses:
+                if b.url_classification == UrlClassification.OFFICIAL_SITE:
+                    b.audit = Audit(
+                        audited_at=datetime(2026, 5, 3, tzinfo=timezone.utc),
+                        deficiencies=["No SSL certificate", "No menu page found"],
+                    )
+            return businesses
+
+        monkeypatch.setattr("leadscout.cli.audit_websites", fake_audit)
+        data_file = self._seed_data_file(tmp_path)
+
+        result = runner.invoke(
+            cli,
+            ["--data-dir", str(tmp_path), "audit", "--data-file", data_file],
+        )
+        assert result.exit_code == 0, result.output
+        # 1 official + 1 social: only the official one was audited.
+        assert "1 businesses audited" in result.output
+        assert "2 total deficiencies" in result.output

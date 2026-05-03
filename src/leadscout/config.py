@@ -66,6 +66,34 @@ CUSTOM_SEARCH_DAILY_LIMIT = 100  # Google's hard cap; informational only
 CUSTOM_SEARCH_SAFE_LIMIT = 95  # Our hard stop; 5-query margin for safety
 CUSTOM_SEARCH_WARN_THRESHOLD = 80  # Log a warning at/after this count
 
+# --- Website audit (feature 04) ---
+# Per-site Playwright timeout. 30s is enough for slow restaurant sites
+# (Wix/Squarespace pages with heavy assets) without making a stalled
+# scan drag forever.
+AUDIT_PAGE_TIMEOUT_MS = 30_000
+# After domcontentloaded fires, give the page up to this long to settle
+# into "networkidle". Persistent WebSockets/analytics never settle, so
+# we wrap this in try/except and proceed even if it times out.
+AUDIT_NETWORKIDLE_TIMEOUT_MS = 10_000
+# Mobile viewport for the headless browser. Restaurant customers are
+# overwhelmingly on phones; auditing mobile behavior is the point.
+AUDIT_VIEWPORT_WIDTH = 375
+AUDIT_VIEWPORT_HEIGHT = 812
+# Realistic Chrome UA string. Default Playwright UA is detectable and
+# triggers Cloudflare/Akamai bot challenges on a non-trivial fraction
+# of restaurant sites.
+AUDIT_USER_AGENT = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+    "Version/17.0 Mobile/15E148 Safari/604.1"
+)
+# Re-audit window: skip businesses whose audit is fresher than this.
+# Restaurant sites change slowly; 7 days is plenty.
+AUDIT_FRESHNESS_DAYS = 7
+# Lighthouse mobile-performance score below this triggers a deficiency.
+# 50 is Google's "needs improvement" boundary.
+AUDIT_PERFORMANCE_THRESHOLD = 50
+
 # --- Lead scoring weights ---
 # Each key maps a deficiency to the points it adds to a business's lead score.
 # Higher score = better lead (more likely to need a website or improvements).

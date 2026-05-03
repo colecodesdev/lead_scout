@@ -5,6 +5,7 @@ from pathlib import Path
 
 import click
 
+from leadscout.audit import audit_websites
 from leadscout.config import DEFAULT_RADIUS
 from leadscout.discovery import discover_urls
 from leadscout.exceptions import APIError, LeadScoutError
@@ -209,10 +210,66 @@ def discover(ctx, data_file: str, force: bool) -> None:
 
 
 @cli.command()
+@click.option(
+    "--data-file",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Path to a JSON file produced by `search` / `discover`.",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Re-audit even businesses with a fresh audit (< 7 days old).",
+)
 @click.pass_context
-def audit(ctx) -> None:
+def audit(ctx, data_file: str, force: bool) -> None:
     """Audit business websites for performance and features."""
-    click.echo("Not yet implemented.")
+    # Three-level PSI key chain matching the spec's "use Places key if
+    # set, fall back to unauthenticated" while adding an explicit primary
+    # for clarity. Unauthenticated still works (lower quota).
+    api_key = (
+        os.environ.get("GOOGLE_PAGESPEED_API_KEY")
+        or os.environ.get("GOOGLE_PLACES_API_KEY")
+        or None
+    )
+    if not api_key:
+        click.echo(
+            "Note: no PageSpeed API key in env; using unauthenticated "
+            "PSI requests (lower quota).",
+            err=True,
+        )
+
+    path = Path(data_file)
+    businesses = load_data(path)
+    if not businesses:
+        click.echo(f"No businesses in {path}; run `search` first.")
+        return
+
+    try:
+        updated = audit_websites(businesses, api_key, force=force)
+    except APIError as e:
+        click.echo(f"Error: {e}", err=True)
+        ctx.exit(1)
+    except LeadScoutError as e:
+        # AuditError (e.g., "playwright not installed", browser launch
+        # failure) is a subclass of LeadScoutError; same handling.
+        click.echo(f"Error: {e}", err=True)
+        ctx.exit(1)
+
+    save_data(path, updated)
+
+    # Summary: count how many got audited this run vs total, plus the
+    # aggregate deficiency count for a quick read on lead density.
+    audited = sum(
+        1 for b in updated if b.audit and b.audit.audited_at
+    )
+    total_deficiencies = sum(
+        len(b.audit.deficiencies) for b in updated if b.audit
+    )
+    click.echo(
+        f"{audited} businesses audited, {total_deficiencies} total "
+        f"deficiencies recorded. Saved to {path}"
+    )
 
 
 @cli.command()

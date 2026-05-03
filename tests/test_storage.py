@@ -50,6 +50,47 @@ class TestSaveAndLoad:
         assert b.rating == 4.5
         assert b.review_count == 100
 
+    def test_load_audit_with_missing_new_fields(self, data_file):
+        # Backward-compat: a JSON file produced before feature 04
+        # added the new Audit fields (or hand-edited to drop some)
+        # must still load cleanly. Audit.from_dict filters unknown
+        # keys and provides defaults for missing ones.
+        # This protects future schema changes too: any field added
+        # after this point should have a default so old data loads.
+        legacy = [
+            {
+                "place_id": "abc",
+                "name": "Old Business",
+                "address": "100 Main",
+                # Sparse audit: only 2 fields, no lighthouse dicts,
+                # no broken_assets, no deficiencies, no audited_at.
+                "audit": {
+                    "has_ssl": True,
+                    "has_menu": True,
+                },
+            }
+        ]
+        # Write the legacy JSON directly so load_data has to cope.
+        data_file.parent.mkdir(parents=True, exist_ok=True)
+        data_file.write_text(
+            __import__("json").dumps(legacy), encoding="utf-8"
+        )
+
+        loaded = load_data(data_file)
+        assert len(loaded) == 1
+        b = loaded[0]
+        assert b.audit is not None
+        # The two fields that were present came through.
+        assert b.audit.has_ssl is True
+        assert b.audit.has_menu is True
+        # Everything else falls back to dataclass defaults.
+        assert b.audit.lighthouse_mobile is None
+        assert b.audit.lighthouse_desktop is None
+        assert b.audit.has_hours is False
+        assert b.audit.broken_assets == []
+        assert b.audit.deficiencies == []
+        assert b.audit.audited_at is None
+
     def test_round_trip_last_scanned_datetime(self, data_file):
         # last_scanned was added in feature 02; the storage encoder must
         # serialize tz-aware datetimes to ISO-8601 strings, and from_dict
@@ -62,7 +103,27 @@ class TestSaveAndLoad:
         assert loaded[0].last_scanned == scanned_at
 
     def test_round_trip_with_audit_and_lead(self, data_file):
-        audit = Audit(performance_score=0.85, has_ssl=True, has_menu_page=True)
+        # Exercises the feature 04 Audit shape: per-strategy lighthouse
+        # dicts, audited_at datetime, broken_assets list of dicts, and
+        # deficiencies. All fields must round-trip through JSON.
+        audited_at = datetime(2026, 5, 3, 14, 0, 0, tzinfo=timezone.utc)
+        audit = Audit(
+            lighthouse_mobile={
+                "performance": 23, "accessibility": 90,
+                "seo": 80, "best_practices": 70,
+            },
+            lighthouse_desktop={
+                "performance": 65, "accessibility": 92,
+                "seo": 85, "best_practices": 80,
+            },
+            has_menu=True,
+            has_ssl=True,
+            broken_assets=[
+                {"url": "https://x.example/a.png", "status": 404, "type": "image"}
+            ],
+            deficiencies=["No mobile viewport configured", "No online ordering"],
+            audited_at=audited_at,
+        )
         lead = Lead(tier=LeadTier.MISSING_FEATURES, score=25, reasons=["no ordering"])
         original = _make_business(audit=audit, lead=lead)
 
@@ -71,9 +132,21 @@ class TestSaveAndLoad:
 
         b = loaded[0]
         assert b.audit is not None
-        assert b.audit.performance_score == 0.85
+        assert b.audit.lighthouse_mobile == {
+            "performance": 23, "accessibility": 90,
+            "seo": 80, "best_practices": 70,
+        }
+        assert b.audit.lighthouse_desktop["performance"] == 65
+        assert b.audit.has_menu is True
         assert b.audit.has_ssl is True
-        assert b.audit.has_menu_page is True
+        assert b.audit.broken_assets == [
+            {"url": "https://x.example/a.png", "status": 404, "type": "image"}
+        ]
+        assert b.audit.deficiencies == [
+            "No mobile viewport configured", "No online ordering"
+        ]
+        # audited_at must come back as a tz-aware datetime equal to original.
+        assert b.audit.audited_at == audited_at
         assert b.lead is not None
         assert b.lead.tier == LeadTier.MISSING_FEATURES
         assert b.lead.score == 25

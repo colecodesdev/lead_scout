@@ -1,0 +1,10 @@
+{
+  "lighthouseResult": {
+    "categories": {
+      "performance": { "score": 0.87 },
+      "accessibility": { "score": 0.95 },
+      "seo": { "score": 0.92 },
+      "best-practices": { "score": 0.83 }
+    }
+  }
+}
