@@ -270,6 +270,14 @@ def _audit_one(
 # ---------------------------------------------------------------------------
 
 
+# Per-request timeout for PSI. The default httpx timeout (HTTP_TIMEOUT,
+# 30s) is too short for PSI: heavy sites (chain-restaurant location pages,
+# JS-heavy single-page apps) routinely take 30-60s for Lighthouse to
+# finish. 60s lets the slow-but-eventually-succeeding sites finish while
+# still bounding our worst-case per-call wait.
+PSI_REQUEST_TIMEOUT_S = 60
+
+
 @with_api_retry(base_wait=PSI_API_SLEEP)
 def _psi_request(
     client: httpx.Client,
@@ -281,14 +289,17 @@ def _psi_request(
 
     Decorated with @with_api_retry but with a longer base_wait override:
     PSI rate-limits more aggressively than Places, so the first retry
-    waits ~PSI_API_SLEEP (4s) instead of the default 2s.
+    waits ~PSI_API_SLEEP (4s) instead of the default 2s. We also pass
+    a longer per-request timeout because PSI is service-slow.
     """
     params: dict[str, str] = {"url": url, "strategy": strategy}
     # PSI works without auth at lower quota; skip the key param entirely
     # rather than passing an empty string (which the API may reject).
     if api_key:
         params["key"] = api_key
-    response = client.get(PSI_ENDPOINT, params=params)
+    response = client.get(
+        PSI_ENDPOINT, params=params, timeout=PSI_REQUEST_TIMEOUT_S
+    )
     response.raise_for_status()
     return response.json()
 
@@ -299,12 +310,25 @@ def _fetch_psi_scores(
     strategy: str,
     api_key: str | None,
 ) -> dict:
-    """Run a PSI request and parse it. Translates HTTP errors to APIError."""
+    """Run a PSI request and parse it. Translates HTTP errors to APIError.
+
+    Catches both HTTPStatusError (4xx/5xx after retry exhaustion) and
+    TransportError (timeouts, connection failures). Both are converted
+    to APIError so _audit_one's per-business log-and-continue handler
+    skips the affected business instead of aborting the whole batch.
+    """
     try:
         data = _psi_request(client, url, strategy, api_key)
     except httpx.HTTPStatusError as e:
         raise APIError(
             f"PSI {strategy} for {url}: HTTP {e.response.status_code}"
+        ) from e
+    except httpx.TransportError as e:
+        # Includes ReadTimeout, ConnectError, etc. PSI is service-slow
+        # and occasionally takes longer than PSI_REQUEST_TIMEOUT_S even
+        # after our retries; treat as recoverable for this business.
+        raise APIError(
+            f"PSI {strategy} for {url} failed: {type(e).__name__}: {e}"
         ) from e
     return _parse_psi_scores(data)
 

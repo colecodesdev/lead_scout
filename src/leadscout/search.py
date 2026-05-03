@@ -39,8 +39,16 @@ NEARBY_SEARCH_ENDPOINT = "https://places.googleapis.com/v1/places:searchNearby"
 # --- Field mask ---
 # The Places API (New) requires a header listing exactly which fields you
 # want back. Without it you get billed for the full response but receive
-# almost nothing. This list mirrors what the spec asks us to populate on
-# Business, plus `nextPageToken` for pagination.
+# almost nothing.
+#
+# Note: Nearby Search (New) does NOT support pagination -- it returns up
+# to 20 results in a single call with no nextPageToken. Including
+# `nextPageToken` in the field mask causes a 400 INVALID_ARGUMENT
+# ("Cannot find matching fields for path 'nextPageToken'"). The
+# pagination loop in `_search_nearby` below still exists for safety
+# (and to support a future swap to Text Search, which DOES paginate),
+# but it just runs once for Nearby Search and exits when no token comes
+# back -- which is always.
 FIELD_MASK = (
     "places.id,"
     "places.displayName,"
@@ -48,8 +56,7 @@ FIELD_MASK = (
     "places.nationalPhoneNumber,"
     "places.websiteUri,"
     "places.rating,"
-    "places.types,"
-    "nextPageToken"
+    "places.types"
 )
 
 # --- Pagination delay ---
@@ -226,6 +233,11 @@ def _search_nearby(
             # (429/5xx). Turn the underlying error into a clean APIError
             # with a hint for common cases the user might hit.
             status = e.response.status_code
+            # Capture a body excerpt; Places returns a JSON error
+            # describing exactly what's wrong (invalid field mask,
+            # malformed body, etc.) and surfacing it here makes the
+            # CLI user-debuggable without needing to reproduce.
+            body_excerpt = (e.response.text or "")[:1500]
             if status in (401, 403):
                 raise APIError(
                     f"Google Places API auth failure (HTTP {status}). "
@@ -237,7 +249,7 @@ def _search_nearby(
                     "Wait and try again, or check your billing."
                 ) from e
             raise APIError(
-                f"Google Places API request failed with HTTP {status}"
+                f"Google Places API request failed with HTTP {status}: {body_excerpt}"
             ) from e
 
         # `places` is missing entirely on an empty response; default to []
