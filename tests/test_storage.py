@@ -1,17 +1,17 @@
+from pathlib import Path
+
 import pytest
 
+from leadscout.exceptions import StorageError
 from leadscout.models import Audit, Business, Lead, LeadTier, UrlClassification, UrlSource
 from leadscout.storage import load_data, merge_business, save_data
 
 
 @pytest.fixture
-def data_dir(tmp_path):
-    return tmp_path / "data"
-
-
-@pytest.fixture
-def data_file(data_dir):
-    return data_dir / "test.json"
+def data_file(tmp_path):
+    # tmp_path/data exercises the auto-create-parent behavior in save_data;
+    # the "data" subdir does not exist until storage creates it.
+    return tmp_path / "data" / "test.json"
 
 
 def _make_business(**overrides) -> Business:
@@ -134,3 +134,33 @@ class TestAtomicWrite:
         loaded = load_data(data_file)
         assert len(loaded) == 1
         assert loaded[0].place_id == "new_data"
+
+    def test_failed_write_preserves_original_and_cleans_temp(self, data_file, monkeypatch):
+        # Simulate the spec's "atomic write doesn't corrupt on failure" case:
+        # write a known-good file, then force the rename step to blow up
+        # mid-save and verify (a) the original is untouched and (b) no
+        # orphan .tmp files are left behind.
+        original = [_make_business(place_id="keep_me", name="Original")]
+        save_data(data_file, original)
+
+        # Snapshot the on-disk bytes so we can confirm they're unchanged
+        # even after the failed save below.
+        original_bytes = data_file.read_bytes()
+
+        # Patch Path.replace to raise. mkstemp + json.dump still run, so
+        # this exercises the cleanup branch in save_data that unlinks the
+        # temp file before re-raising.
+        def boom(self, target):
+            raise OSError("simulated failure during atomic rename")
+
+        monkeypatch.setattr(Path, "replace", boom)
+
+        with pytest.raises(StorageError):
+            save_data(data_file, [_make_business(place_id="should_not_persist")])
+
+        # Original file content must be byte-identical to before the failure.
+        assert data_file.read_bytes() == original_bytes
+
+        # And no .leadscout_*.tmp orphans left in the directory.
+        leftovers = list(data_file.parent.glob(".leadscout_*.tmp"))
+        assert leftovers == []

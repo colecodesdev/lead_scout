@@ -111,11 +111,15 @@ class Business:
 
     @classmethod
     def from_dict(cls, data: dict) -> "Business":
+        # Work on a shallow copy so we can pop keys without mutating the
+        # caller's dict (json.loads gives us a fresh dict per call, but
+        # tests and future callers may reuse the same dict).
+        payload = dict(data)
+
         # Pop nested objects before constructing, since they need their own
-        # from_dict deserialization. Using pop() so they don't end up in
-        # the **filtered kwargs below.
-        audit_data = data.pop("audit", None)
-        lead_data = data.pop("lead", None)
+        # from_dict deserialization and shouldn't end up in **filtered below.
+        audit_data = payload.pop("audit", None)
+        lead_data = payload.pop("lead", None)
 
         # Reconstruct nested dataclasses if present in the stored data
         audit = Audit.from_dict(audit_data) if audit_data else None
@@ -123,12 +127,12 @@ class Business:
 
         # Reconstruct enums from their string values. Pop them so they
         # don't conflict with the explicit keyword args below.
-        url_source = UrlSource(data.pop("url_source", "none"))
-        url_classification = UrlClassification(data.pop("url_classification", "none"))
+        url_source = UrlSource(payload.pop("url_source", "none"))
+        url_classification = UrlClassification(payload.pop("url_classification", "none"))
 
         # Only pass keys that match actual dataclass fields, ignoring any
         # unknown keys that might exist in older stored data
-        filtered = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
+        filtered = {k: v for k, v in payload.items() if k in cls.__dataclass_fields__}
         return cls(
             **filtered,
             url_source=url_source,
