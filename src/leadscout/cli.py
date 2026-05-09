@@ -5,7 +5,7 @@ from pathlib import Path
 import click
 
 from leadscout.audit import audit_websites
-from leadscout.config import DEFAULT_RADIUS
+from leadscout.config import DEFAULT_BUSINESS_TYPES, DEFAULT_RADIUS
 from leadscout.discovery import discover_urls, reclassify_urls
 from leadscout.exceptions import APIError, LeadScoutError
 from leadscout.models import LeadTier, UrlClassification, UrlSource
@@ -64,7 +64,7 @@ def _load_env_file(path: Path = Path(".env")) -> None:
 @click.option("--data-dir", default="./data", help="Directory for data files")
 @click.pass_context
 def cli(ctx, verbose: bool, data_dir: str) -> None:
-    """LeadScout: Find restaurants that need websites."""
+    """LeadScout: Find local businesses that need websites."""
     # Load .env from cwd before any subcommand reads env vars. setdefault()
     # in the loader means values already exported in the shell still win.
     _load_env_file()
@@ -109,8 +109,19 @@ def cli(ctx, verbose: bool, data_dir: str) -> None:
     show_default=True,
     help="Search radius in meters.",
 )
+@click.option(
+    "--category",
+    multiple=True,
+    default=DEFAULT_BUSINESS_TYPES,
+    show_default=True,
+    help=(
+        'Google Places type(s) to search for. Repeat for multiple: '
+        '--category doctor --category dentist. '
+        'See Google Places "Table A" types for valid values.'
+    ),
+)
 @click.pass_context
-def search(ctx, location: str, radius: int) -> None:
+def search(ctx, location: str, radius: int, category: tuple[str, ...]) -> None:
     """Search for local businesses via Google Places API."""
     # API key comes from the environment; we use os.environ.get instead of
     # python-dotenv (project decision: no implicit .env loading dependency).
@@ -127,7 +138,9 @@ def search(ctx, location: str, radius: int) -> None:
     # Run the search. Any APIError surfaced from search_places (auth,
     # quota, geocoding failures) is a clean user-facing message.
     try:
-        businesses = search_places(location, radius, api_key)
+        businesses = search_places(
+            location, radius, api_key, included_types=list(category)
+        )
     except APIError as e:
         click.echo(f"Error: {e}", err=True)
         ctx.exit(1)
@@ -410,6 +423,17 @@ def _print_ranked_summary(ranked: list) -> None:
     help="Search radius in meters.",
 )
 @click.option(
+    "--category",
+    multiple=True,
+    default=DEFAULT_BUSINESS_TYPES,
+    show_default=True,
+    help=(
+        'Google Places type(s) to search for. Repeat for multiple: '
+        '--category doctor --category dentist. '
+        'See Google Places "Table A" types for valid values.'
+    ),
+)
+@click.option(
     "--force",
     is_flag=True,
     help="Force re-discovery + re-audit on existing entries.",
@@ -421,7 +445,10 @@ def _print_ranked_summary(ranked: list) -> None:
     help="Optional: also export ranked leads to CSV after scoring.",
 )
 @click.pass_context
-def run(ctx, location: str, radius: int, force: bool, export: str | None) -> None:
+def run(
+    ctx, location: str, radius: int, category: tuple[str, ...],
+    force: bool, export: str | None,
+) -> None:
     """Run the full pipeline: search -> discover -> audit -> score."""
     # Places is the only hard requirement (it's the entry point of the
     # pipeline). Custom Search is optional: if its env vars are absent
@@ -457,8 +484,10 @@ def run(ctx, location: str, radius: int, force: bool, export: str | None) -> Non
 
     try:
         # --- Stage 1: search (Google Places) ---
-        click.echo(f"[1/4] search   : {location} (radius={radius}m)")
-        found = search_places(location, radius, places_key)
+        click.echo(f"[1/4] search   : {location} (radius={radius}m, types={list(category)})")
+        found = search_places(
+            location, radius, places_key, included_types=list(category)
+        )
         # Merge into existing data if the location was scanned before.
         existing = load_data(path)
         by_id = {b.place_id: b for b in existing}

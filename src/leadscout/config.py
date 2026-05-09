@@ -23,6 +23,10 @@ HTTP_TIMEOUT = 30
 # --- Search defaults ---
 # Default search radius in meters for Google Places nearby search
 DEFAULT_RADIUS = 5000
+# Default business type(s) for the Places Nearby Search `includedTypes` filter.
+# These are Google Places "Table A" types. Pass one or more via --category on
+# the CLI. Examples: "restaurant", "dentist", "doctor", "pharmacy", "gym".
+DEFAULT_BUSINESS_TYPES = ["restaurant"]
 
 # --- URL discovery & classification (feature 03) ---
 # Domains that classify as social-media presence (not an owned site).

@@ -511,7 +511,7 @@ class TestRunCommand:
         # validate the chaining contract (search -> discover -> audit -> score).
         stages_called: list[str] = []
 
-        def fake_search(location, radius, key):
+        def fake_search(location, radius, key, **kwargs):
             stages_called.append("search")
             return [
                 _make_business(
@@ -589,7 +589,7 @@ class TestRunCommand:
 
         called: list[str] = []
 
-        def fake_search(location, radius, key):
+        def fake_search(location, radius, key, **kwargs):
             called.append("search")
             return [
                 _make_business(
@@ -650,7 +650,7 @@ class TestRunCommand:
 
         called: list[str] = []
 
-        def fake_search(location, radius, key):
+        def fake_search(location, radius, key, **kwargs):
             called.append("search")
             return [
                 _make_business(
@@ -712,7 +712,7 @@ class TestRunCommand:
 
         captured: dict = {}
 
-        def fake_search(location, radius, key):
+        def fake_search(location, radius, key, **kwargs):
             return [
                 _make_business(
                     place_id="A",
@@ -763,7 +763,7 @@ class TestRunCommand:
         monkeypatch.setenv("GOOGLE_CUSTOM_SEARCH_API_KEY", "cs-key")
         monkeypatch.setenv("GOOGLE_CUSTOM_SEARCH_CX", "cs-cx")
 
-        def fake_search(location, radius, key):
+        def fake_search(location, radius, key, **kwargs):
             return [
                 _make_business(
                     place_id="A",

@@ -1,10 +1,11 @@
-"""Google Places (New) integration: discover restaurants in a target area.
+"""Google Places (New) integration: discover businesses in a target area.
 
 This is the first stage of the LeadScout pipeline. Given a city/state string
 and a search radius, it:
 
 1. Geocodes the location to a lat/lng (Geocoding API).
-2. Calls the Places Nearby Search (New) endpoint, filtered to restaurants.
+2. Calls the Places Nearby Search (New) endpoint, filtered to the requested
+   business types (defaults to restaurants).
 3. Paginates through `nextPageToken` until exhausted, respecting Google's
    ~2s delay before a fresh page token becomes valid.
 4. Parses each result into a `Business` dataclass with `url_source` /
@@ -21,7 +22,7 @@ from datetime import datetime, timezone
 import httpx
 
 from leadscout.api import create_client, with_api_retry
-from leadscout.config import PLACES_API_SLEEP
+from leadscout.config import DEFAULT_BUSINESS_TYPES, PLACES_API_SLEEP
 from leadscout.exceptions import APIError
 from leadscout.models import Business, UrlClassification, UrlSource
 
@@ -65,28 +66,37 @@ FIELD_MASK = (
 # minimum; we use 2.5s to give a small safety margin.
 NEXT_PAGE_TOKEN_DELAY = 2.5
 
-# Type filter for the Nearby Search request. "restaurant" is one of the
-# Google Places "Table A" type values; it matches restaurants of all
-# cuisines (more specific subtypes still match this category).
-RESTAURANT_TYPE = "restaurant"
-
-
-def search_places(location: str, radius: int, api_key: str) -> list[Business]:
-    """Discover restaurants near a location.
+def search_places(
+    location: str,
+    radius: int,
+    api_key: str,
+    *,
+    included_types: list[str] | None = None,
+) -> list[Business]:
+    """Discover businesses near a location.
 
     Geocodes the location string, then runs Places Nearby Search around the
     resulting coordinates. Returns a list of Business dataclasses, one per
-    restaurant found across all paginated result pages.
+    business found across all paginated result pages.
+
+    Args:
+        included_types: Google Places "Table A" type strings to filter by
+            (e.g. ["restaurant"], ["dentist", "doctor"]). Defaults to
+            DEFAULT_BUSINESS_TYPES from config.py.
 
     Raises APIError on unrecoverable failures (bad API key, exhausted quota
     after retries, geocoding failure, no results for the location). Transient
     failures are retried automatically by `with_api_retry` in `api.py`.
     """
+    # Fall back to config default when the caller doesn't specify types.
+    if included_types is None:
+        included_types = DEFAULT_BUSINESS_TYPES
+
     # `with` ensures the underlying connection pool is closed even if an
     # exception escapes. Both endpoints share the same client.
     with create_client() as client:
         lat, lng = _geocode(client, location, api_key)
-        return _search_nearby(client, lat, lng, radius, api_key)
+        return _search_nearby(client, lat, lng, radius, api_key, included_types)
 
 
 # --- Geocoding ---
@@ -154,6 +164,7 @@ def _nearby_request(
     lng: float,
     radius: int,
     api_key: str,
+    included_types: list[str],
     page_token: str | None = None,
 ) -> dict:
     """Single POST to the Places Nearby Search (New) endpoint. Returns parsed JSON.
@@ -171,11 +182,12 @@ def _nearby_request(
         "X-Goog-Api-Key": api_key,
     }
     # Body schema is documented at the URL in the module docstring.
-    # `includedTypes` filters to a single Places "Table A" type.
+    # `includedTypes` filters to one or more Places "Table A" types
+    # (e.g. ["restaurant"], ["dentist", "doctor"]).
     # `locationRestriction.circle` constrains the search to a circular
     # area; radius is in meters.
     body: dict = {
-        "includedTypes": [RESTAURANT_TYPE],
+        "includedTypes": included_types,
         "locationRestriction": {
             "circle": {
                 "center": {"latitude": lat, "longitude": lng},
@@ -200,6 +212,7 @@ def _search_nearby(
     lng: float,
     radius: int,
     api_key: str,
+    included_types: list[str],
 ) -> list[Business]:
     """Run paginated Nearby Search and return parsed Business objects.
 
@@ -226,7 +239,8 @@ def _search_nearby(
         page_index += 1
         try:
             data = _nearby_request(
-                client, lat, lng, radius, api_key, page_token=page_token
+                client, lat, lng, radius, api_key, included_types,
+                page_token=page_token,
             )
         except httpx.HTTPStatusError as e:
             # tenacity has already exhausted retries on retryable codes

@@ -131,7 +131,7 @@ class TestSearchNearbySinglePage:
             return httpx.Response(200, json=fixture)
 
         with _client_with_handler(handler) as client:
-            results = _search_nearby(client, 30.4, -86.0, 5000, "fake_key")
+            results = _search_nearby(client, 30.4, -86.0, 5000, "fake_key", ["restaurant"])
 
         assert len(results) == 3
         with_site = [b for b in results if b.website]
@@ -179,7 +179,7 @@ class TestSearchNearbyPagination:
             return httpx.Response(200, json=next(responses))
 
         with _client_with_handler(handler) as client:
-            results = _search_nearby(client, 30.4, -86.0, 5000, "fake_key")
+            results = _search_nearby(client, 30.4, -86.0, 5000, "fake_key", ["restaurant"])
 
         assert len(results) == 2
         # Set comparison because order across pages isn't part of the contract.
@@ -210,7 +210,7 @@ class TestSearchNearbyRetry:
             return httpx.Response(200, json=fixture)
 
         with _client_with_handler(handler) as client:
-            results = _search_nearby(client, 30.4, -86.0, 5000, "fake_key")
+            results = _search_nearby(client, 30.4, -86.0, 5000, "fake_key", ["restaurant"])
 
         assert len(results) == 3
         assert call_count["n"] == 3
@@ -223,7 +223,7 @@ class TestSearchNearbyRetry:
 
         with _client_with_handler(handler) as client:
             with pytest.raises(APIError, match="quota exceeded"):
-                _search_nearby(client, 30.4, -86.0, 5000, "fake_key")
+                _search_nearby(client, 30.4, -86.0, 5000, "fake_key", ["restaurant"])
 
     def test_401_does_not_retry(self, no_sleep):
         """Auth failures are permanent; tenacity should give up after 1 try."""
@@ -235,7 +235,7 @@ class TestSearchNearbyRetry:
 
         with _client_with_handler(handler) as client:
             with pytest.raises(APIError, match="auth failure"):
-                _search_nearby(client, 30.4, -86.0, 5000, "fake_key")
+                _search_nearby(client, 30.4, -86.0, 5000, "fake_key", ["restaurant"])
 
         # 4xx auth errors are not in RETRYABLE_STATUS_CODES, so the
         # decorator should re-raise immediately on the first attempt.
