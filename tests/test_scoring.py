@@ -30,13 +30,16 @@ from leadscout.scoring import (
     _compute_score,
     _count_dom_failures,
     _is_failing_audit,
+    aggregate_leads,
     csv_path_for_data_file,
+    export_campaign_markdown,
     export_to_csv,
     export_to_markdown,
     markdown_path_for_data_file,
     rank_leads,
     score_leads,
 )
+from leadscout.storage import save_data
 
 
 def _make_business(**overrides) -> Business:
@@ -623,3 +626,143 @@ class TestMarkdownPathForDataFile:
         assert result.parent == Path("data")
         assert result.name.startswith("leads_santa_rosa_beach_fl_")
         assert result.suffix == ".md"
+
+
+# ---------------------------------------------------------------------------
+# Campaign aggregation (feature 06)
+# ---------------------------------------------------------------------------
+
+
+def _scored_business(
+    place_id: str,
+    name: str,
+    *,
+    tier: LeadTier,
+    score: int = 80,
+    address: str = "100 Main St, Test, FL 32459, USA",
+) -> Business:
+    """Helper that builds a fully-scored Business ready for aggregation
+    or export tests. Skips the audit fixture entirely since aggregation
+    only inspects place_id, name, tier, score, and address."""
+    biz = _make_business(
+        place_id=place_id, name=name, address=address,
+        rating=4.4,
+    )
+    biz.lead = Lead(tier=tier, score=score, reasons=["No website found"])
+    return biz
+
+
+class TestAggregateLeads:
+    def test_loads_every_location_file(self, tmp_path):
+        # Two location JSONs under tmp_path; aggregate should return
+        # the union of their businesses.
+        save_data(tmp_path / "santa_rosa_beach_fl.json", [
+            _scored_business("A", "SRB Cafe", tier=LeadTier.NO_WEBSITE),
+        ])
+        save_data(tmp_path / "destin_fl.json", [
+            _scored_business("B", "Destin Diner", tier=LeadTier.NO_WEBSITE),
+            _scored_business("C", "Destin Bar", tier=LeadTier.MISSING_FEATURES),
+        ])
+        result = aggregate_leads(tmp_path)
+        names = {b.name for b in result}
+        assert names == {"SRB Cafe", "Destin Diner", "Destin Bar"}
+
+    def test_ignores_hidden_quota_files(self, tmp_path):
+        # Drop a real businesses JSON plus the two hidden state files
+        # campaigns produce. Aggregator should skip the hidden ones.
+        save_data(tmp_path / "townville_fl.json", [
+            _scored_business("A", "TV Cafe", tier=LeadTier.NO_WEBSITE),
+        ])
+        (tmp_path / ".places_quota.json").write_text(
+            '{"date":"2026-05-09","count":17}', encoding="utf-8",
+        )
+        (tmp_path / ".custom_search_quota.json").write_text(
+            '{"date":"2026-05-09","count":3}', encoding="utf-8",
+        )
+        result = aggregate_leads(tmp_path)
+        # Only the businesses JSON contributed; quota files were skipped.
+        assert len(result) == 1
+        assert result[0].name == "TV Cafe"
+
+    def test_returns_empty_when_data_dir_missing(self, tmp_path):
+        # Aggregator should handle a missing data dir gracefully (the
+        # CLI's `report` command exits with a friendly message in that
+        # case, but the function itself shouldn't raise).
+        result = aggregate_leads(tmp_path / "does_not_exist")
+        assert result == []
+
+    def test_returns_empty_when_no_json_files(self, tmp_path):
+        # Empty data dir is also a valid first-run state.
+        result = aggregate_leads(tmp_path)
+        assert result == []
+
+
+class TestExportCampaignMarkdown:
+    def test_writes_file_with_per_location_table(self, tmp_path):
+        businesses = [
+            _scored_business(
+                "A", "SRB Cafe", tier=LeadTier.NO_WEBSITE, score=90,
+                address="100 Main St, Santa Rosa Beach, FL 32459, USA",
+            ),
+            _scored_business(
+                "B", "Destin Diner", tier=LeadTier.FAILING_AUDIT, score=70,
+                address="200 Beach Rd, Destin, FL 32541, USA",
+            ),
+        ]
+        out = tmp_path / "campaign.md"
+        export_campaign_markdown(businesses, out, top_n=10)
+        text = out.read_text(encoding="utf-8")
+        # Header + per-location table + detail section.
+        assert "# LeadScout Campaign Report" in text
+        assert "## Leads by location" in text
+        assert "Santa Rosa Beach, FL" in text
+        assert "Destin, FL" in text
+        # Top-scored lead appears first in detail section.
+        srb_pos = text.find("SRB Cafe")
+        destin_pos = text.find("Destin Diner")
+        assert srb_pos > 0 and destin_pos > 0
+        assert srb_pos < destin_pos
+
+    def test_filters_by_min_tier(self, tmp_path):
+        # Default min_tier is MISSING_FEATURES, so a SKIP-tier lead is
+        # excluded. Verify by including one of each and asserting only
+        # the qualifying ones land in the detail section.
+        businesses = [
+            _scored_business("A", "Active", tier=LeadTier.NO_WEBSITE, score=80),
+            _scored_business("B", "Skipper", tier=LeadTier.SKIP, score=0),
+        ]
+        out = tmp_path / "campaign.md"
+        export_campaign_markdown(businesses, out)
+        text = out.read_text(encoding="utf-8")
+        assert "Active" in text
+        assert "Skipper" not in text
+
+    def test_top_n_caps_detail_section(self, tmp_path):
+        businesses = [
+            _scored_business(
+                f"id-{i}", f"Biz {i}", tier=LeadTier.NO_WEBSITE,
+                score=80 - i,
+            )
+            for i in range(10)
+        ]
+        out = tmp_path / "campaign.md"
+        export_campaign_markdown(businesses, out, top_n=3)
+        text = out.read_text(encoding="utf-8")
+        # Only the 3 highest-scoring businesses get detail blocks.
+        assert "Biz 0" in text
+        assert "Biz 1" in text
+        assert "Biz 2" in text
+        assert "Biz 3" not in text
+        # The cap note explains the truncation to the reader.
+        assert "showing top 3 of 10" in text
+
+    def test_no_qualifying_leads_writes_empty_message(self, tmp_path):
+        # Every business is below the cutoff; report still writes a
+        # file but the body says nothing qualifies.
+        businesses = [
+            _scored_business("A", "Skip", tier=LeadTier.SKIP, score=0),
+        ]
+        out = tmp_path / "campaign.md"
+        export_campaign_markdown(businesses, out)
+        text = out.read_text(encoding="utf-8")
+        assert "No leads at tier" in text

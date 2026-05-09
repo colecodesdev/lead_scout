@@ -46,6 +46,7 @@ from leadscout.models import (
     LeadTier,
     UrlClassification,
 )
+from leadscout.storage import load_data
 
 logger = logging.getLogger(__name__)
 
@@ -466,3 +467,237 @@ def markdown_path_for_data_file(data_file: Path) -> Path:
     """
     today = datetime.now(timezone.utc).date().isoformat()
     return data_file.parent / f"leads_{data_file.stem}_{today}.md"
+
+
+# ---------------------------------------------------------------------------
+# Cross-location aggregation (feature 06: campaign mode).
+# ---------------------------------------------------------------------------
+
+
+# Tier ordering used for the report's `--min-tier` filter. Indices ascend
+# from "best lead" (no_website) to "not a lead" (skip). A min-tier of
+# `missing_features` includes everything strictly better, i.e. tiers at
+# index <= MISSING_FEATURES's index.
+_TIER_QUALITY_ORDER = (
+    LeadTier.NO_WEBSITE,
+    LeadTier.FAILING_AUDIT,
+    LeadTier.MISSING_FEATURES,
+    LeadTier.SKIP,
+)
+
+
+def aggregate_leads(data_dir: Path) -> list[Business]:
+    """Load every per-location JSON in `data_dir` into a single list.
+
+    Used by the `report` CLI command (feature 06) to roll up a multi-day
+    campaign's results across many locations. No deduplication: a chain
+    franchise in two cities has two distinct `place_id`s and represents
+    two distinct sales prospects, so we keep both.
+
+    Files starting with a dot (e.g. `.places_quota.json`,
+    `.custom_search_quota.json`) are skipped because they're internal
+    state, not business records. We filter on the leading dot in code
+    rather than relying on the OS-shell glob behavior so this works
+    identically across platforms (PowerShell on Windows does NOT skip
+    dotfiles by default the way bash does).
+
+    Returns an empty list if `data_dir` doesn't exist yet (first-run
+    convenience matching `load_data`'s missing-file behavior).
+    """
+    # Defensive early return for a missing data dir. Path.glob on a
+    # non-existent path silently yields nothing, so this is mostly for
+    # the explicit log line; without it, an empty result here is
+    # ambiguous between "no scans yet" and "data_dir typo'd."
+    if not data_dir.exists():
+        logger.warning("Data dir %s does not exist; nothing to aggregate.", data_dir)
+        return []
+
+    combined: list[Business] = []
+    files_loaded = 0
+    # Sorted for stable output; `glob` makes no ordering guarantees and
+    # the report's tier-summary table reads better when the same files
+    # are processed in the same order across invocations.
+    for path in sorted(data_dir.glob("*.json")):
+        if path.name.startswith("."):
+            # Hidden state file (e.g., quota tracker). Skip.
+            continue
+        try:
+            businesses = load_data(path)
+        except Exception as e:  # noqa: BLE001
+            # One bad file shouldn't fail the whole report; surface the
+            # error and continue. load_data already raises StorageError
+            # on parse failures, so the message is already user-friendly.
+            logger.warning("Skipping %s: %s", path, e)
+            continue
+        files_loaded += 1
+        combined.extend(businesses)
+
+    logger.info(
+        "Aggregated %d businesses from %d location file(s) under %s.",
+        len(combined), files_loaded, data_dir,
+    )
+    return combined
+
+
+def _location_label_from_address(address: str) -> str:
+    """Pull a 'City, ST' label out of a Google `formattedAddress`.
+
+    Google's formatted addresses are predictable: "100 Beach Rd, Santa
+    Rosa Beach, FL 32459, USA". The penultimate comma-segment usually
+    holds the city; the segment after that holds "ST ZIP". Returning
+    "City, ST" gives the report a readable per-location grouping
+    without needing a separate field on Business.
+
+    Fall back to the trimmed full address (or "—") on anything we
+    can't parse — defensive default, never raise.
+    """
+    if not address:
+        return "—"
+    # Split on comma, then strip whitespace from each piece. Filter
+    # out empties so trailing commas don't leave a "" in the list.
+    parts = [p.strip() for p in address.split(",") if p.strip()]
+    # Typical shape: ["<street>", "<city>", "<ST ZIP>", "<country>"].
+    # Take the last 3 (drop street/country if present), then pull
+    # city + first token of "ST ZIP". Anything shorter falls through.
+    if len(parts) >= 3:
+        # Country comes last; city is second from end if there are 4+
+        # parts, third from end otherwise.
+        country_present = parts[-1].lower() in {"usa", "united states"}
+        if country_present and len(parts) >= 4:
+            city = parts[-3]
+            state_zip = parts[-2]
+        else:
+            city = parts[-2]
+            state_zip = parts[-1]
+        # First token of "ST ZIP" is the state abbreviation.
+        state_token = state_zip.split()[0] if state_zip.split() else ""
+        if city and state_token:
+            return f"{city}, {state_token}"
+    # Fallback: just the original address, useful for non-US results.
+    return address
+
+
+def export_campaign_markdown(
+    businesses: list[Business],
+    path: Path,
+    *,
+    top_n: int = 50,
+    min_tier: LeadTier = LeadTier.MISSING_FEATURES,
+) -> None:
+    """Write a cross-location ranked markdown to `path`.
+
+    Used by the `report` CLI command. Differs from `export_to_markdown`
+    in three ways:
+    - Adds a per-location summary table at the top (row per City, ST
+      derived from address, with active-lead count).
+    - Includes a `Location` line on each business detail block so the
+      reader can group/sort visually.
+    - `top_n` caps the detail section size; everything below the cut
+      is still counted in the per-location table but not rendered
+      individually (a 7-day campaign across many categories can
+      produce hundreds of leads — surface only the most actionable).
+
+    `min_tier` is inclusive: passing `MISSING_FEATURES` includes
+    `no_website` and `failing_audit` plus `missing_features`, but
+    excludes `skip`. The default mirrors `export_to_markdown`.
+    """
+    # Tier index lookup: position in the quality order tuple. A tier
+    # qualifies if its index is <= the min-tier's index. Built once
+    # so the per-business filter is a dict lookup, not a list search.
+    tier_rank = {t: i for i, t in enumerate(_TIER_QUALITY_ORDER)}
+    cutoff = tier_rank[min_tier]
+
+    # Filter to qualifying leads and sort by score. Skip-tier always
+    # falls out (its index is past every reasonable cutoff). Sort is
+    # stable so businesses with equal scores keep input order.
+    qualifying = [
+        b
+        for b in businesses
+        if b.lead is not None and tier_rank.get(b.lead.tier, 999) <= cutoff
+    ]
+    qualifying.sort(key=lambda b: b.lead.score, reverse=True)
+
+    # Per-location bucket counts. Keys are "City, ST" labels; values
+    # are total counts in that location (qualifying only — skip-tier
+    # is intentionally excluded from this rollup).
+    location_counts: dict[str, int] = {}
+    for biz in qualifying:
+        label = _location_label_from_address(biz.address)
+        location_counts[label] = location_counts.get(label, 0) + 1
+
+    # Slice for detail section. The table totals above stay full; only
+    # the per-business detail blocks honor top_n.
+    rendered = qualifying[:top_n]
+
+    today = datetime.now(timezone.utc).date().isoformat()
+    lines: list[str] = []
+    # Header. Two trailing spaces on metadata lines force markdown
+    # line breaks the same way `export_to_markdown` does.
+    lines.append("# LeadScout Campaign Report")
+    lines.append("")
+    lines.append(f"**Report date:** {today} (UTC)  ")
+    lines.append(f"**Total businesses scanned:** {len(businesses)}  ")
+    lines.append(
+        f"**Active leads (tier ≥ `{min_tier.value}`):** {len(qualifying)}  "
+    )
+    lines.append(f"**Locations covered:** {len(location_counts)}")
+    lines.append("")
+
+    # Per-location summary. Sorted by count desc so the most productive
+    # locations sit at the top. Empty when no qualifying leads exist
+    # (avoids printing an empty table).
+    if location_counts:
+        lines.append("## Leads by location")
+        lines.append("")
+        lines.append("| Location | Active leads |")
+        lines.append("| --- | --- |")
+        for label, count in sorted(
+            location_counts.items(), key=lambda kv: kv[1], reverse=True
+        ):
+            lines.append(f"| {label} | {count} |")
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
+    # Detail section. Same format as the per-location markdown but with
+    # an extra Location line; rendering only the top_n rows so the
+    # output stays scannable for a multi-day campaign.
+    if not rendered:
+        lines.append(
+            f"_No leads at tier `{min_tier.value}` or better across "
+            "the campaign._"
+        )
+    else:
+        cap_note = "" if len(rendered) == len(qualifying) else (
+            f" (showing top {len(rendered)} of {len(qualifying)})"
+        )
+        lines.append(f"## Top leads{cap_note}")
+        lines.append("")
+        for rank, biz in enumerate(rendered, start=1):
+            lead = biz.lead
+            assert lead is not None  # filtered above
+            location = _location_label_from_address(biz.address)
+            lines.append(
+                f"### {rank}. {biz.name} — score {lead.score} — "
+                f"`{lead.tier.value}`"
+            )
+            lines.append("")
+            rating_display = (
+                f"{biz.rating}" if biz.rating is not None else "—"
+            )
+            lines.append(f"- **Location:** {location}")
+            lines.append(f"- **Address:** {biz.address or '—'}")
+            lines.append(f"- **Phone:** {biz.phone or '—'}")
+            lines.append(f"- **Website:** {biz.website or '—'}")
+            lines.append(f"- **Rating:** {rating_display}")
+            lines.append("- **Why it's a lead:**")
+            for reason in lead.reasons:
+                lines.append(f"  - {reason}")
+            lines.append("")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    logger.info(
+        "Wrote campaign markdown (%d leads, %d locations) to %s",
+        len(qualifying), len(location_counts), path,
+    )

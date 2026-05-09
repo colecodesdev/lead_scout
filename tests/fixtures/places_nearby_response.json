@@ -10,6 +10,8 @@
       "nationalPhoneNumber": "(850) 555-0123",
       "websiteUri": "https://coastalcatch.example.com",
       "rating": 4.6,
+      "userRatingCount": 412,
+      "businessStatus": "OPERATIONAL",
       "types": ["seafood_restaurant", "restaurant", "food", "point_of_interest"]
     },
     {
@@ -21,6 +23,8 @@
       "formattedAddress": "200 Gulf Pl, Santa Rosa Beach, FL 32459, USA",
       "websiteUri": "https://beachsideburgers.example.com",
       "rating": 4.2,
+      "userRatingCount": 187,
+      "businessStatus": "OPERATIONAL",
       "types": ["fast_food_restaurant", "restaurant", "food"]
     },
     {
@@ -31,6 +35,8 @@
       },
       "formattedAddress": "300 30A E, Santa Rosa Beach, FL 32459, USA",
       "rating": 4.8,
+      "userRatingCount": 56,
+      "businessStatus": "OPERATIONAL",
       "types": ["restaurant", "food", "point_of_interest"]
     }
   ]

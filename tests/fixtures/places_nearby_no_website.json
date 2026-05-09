@@ -8,6 +8,8 @@
       },
       "formattedAddress": "300 30A E, Santa Rosa Beach, FL 32459, USA",
       "rating": 4.8,
+      "userRatingCount": 56,
+      "businessStatus": "OPERATIONAL",
       "types": ["restaurant", "food", "point_of_interest"]
     }
   ]

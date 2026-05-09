@@ -5,12 +5,16 @@ from pathlib import Path
 import click
 
 from leadscout.audit import audit_websites
+from leadscout.campaign import run_campaign
 from leadscout.config import DEFAULT_BUSINESS_TYPES, DEFAULT_RADIUS
-from leadscout.discovery import discover_urls, reclassify_urls
+from leadscout.discovery import discover_urls
 from leadscout.exceptions import APIError, LeadScoutError
 from leadscout.models import LeadTier, UrlClassification, UrlSource
+from leadscout.pipeline import run_pipeline
 from leadscout.scoring import (
+    aggregate_leads,
     csv_path_for_data_file,
+    export_campaign_markdown,
     export_to_csv,
     export_to_markdown,
     markdown_path_for_data_file,
@@ -471,76 +475,29 @@ def run(
         )
         ctx.exit(1)
 
-    # Decide upfront whether Custom Search is available. None means yes;
-    # a non-None reason string means we'll skip discovery + log why.
-    skip_discover_reason: str | None = None
-    if not cs_key or not cs_cx:
-        skip_discover_reason = (
-            "GOOGLE_CUSTOM_SEARCH_API_KEY or GOOGLE_CUSTOM_SEARCH_CX not set"
-        )
-
     data_dir = Path(ctx.obj["data_dir"])
     path = data_path_for_location(data_dir, location)
 
+    # The pipeline body lives in `pipeline.run_pipeline` so the
+    # `campaign` subcommand below can reuse it. Behavior is preserved
+    # for `run` callers because:
+    # - filter defaults to off (min_review_count=0, no chain block-list);
+    # - no PlacesQuotaTracker is passed (single-shot run isn't
+    #   campaign-budgeted);
+    # - echo=True keeps the same `[N/4] stage : ...` progress lines.
     try:
-        # --- Stage 1: search (Google Places) ---
-        click.echo(f"[1/4] search   : {location} (radius={radius}m, types={list(category)})")
-        found = search_places(
-            location, radius, places_key, included_types=list(category)
+        businesses = run_pipeline(
+            location, radius, list(category), data_dir,
+            places_key=places_key,
+            cs_key=cs_key,
+            cs_cx=cs_cx,
+            psi_key=psi_key,
+            force=force,
+            echo=True,
         )
-        # Merge into existing data if the location was scanned before.
-        existing = load_data(path)
-        by_id = {b.place_id: b for b in existing}
-        for b in found:
-            if b.place_id in by_id:
-                merge_business(by_id[b.place_id], b)
-            else:
-                by_id[b.place_id] = b
-        businesses = list(by_id.values())
-        save_data(path, businesses)
-        click.echo(f"        found  : {len(found)} ({len(businesses)} total)")
-
-        # --- Stage 2: discover (Custom Search + classify) ---
-        if skip_discover_reason:
-            # Env-var-driven skip path: never even try the network call.
-            click.echo(
-                f"[2/4] discover : SKIPPED ({skip_discover_reason}); "
-                "running classification only"
-            )
-            reclassify_urls(businesses)
-        else:
-            click.echo("[2/4] discover : Custom Search + URL classification")
-            try:
-                discover_urls(
-                    businesses, cs_key, cs_cx, data_dir=data_dir, force=force
-                )
-            except APIError as e:
-                # Runtime denial (e.g., the "project does not have access"
-                # 403 that affects new GCP projects). Fall back to the
-                # local-only classification so the pipeline continues
-                # rather than aborting before audit and score.
-                click.echo(
-                    f"        Custom Search unavailable: {e}", err=True
-                )
-                click.echo(
-                    "        Falling back to classification-only.",
-                    err=True,
-                )
-                reclassify_urls(businesses)
-        save_data(path, businesses)
-
-        # --- Stage 3: audit (PSI + Playwright) ---
-        click.echo("[3/4] audit    : PageSpeed Insights + Playwright DOM")
-        audit_websites(businesses, psi_key, force=force)
-        save_data(path, businesses)
-
-        # --- Stage 4: score ---
-        click.echo("[4/4] score    : tier + numeric ranking")
-        score_leads(businesses)
-        save_data(path, businesses)
     except APIError as e:
         # Search/audit/score errors still hard-fail; only Custom Search
-        # was downgraded to soft-fail above (caught inside its try).
+        # is downgraded to soft-fail inside the pipeline.
         click.echo(f"Error: {e}", err=True)
         ctx.exit(1)
     except LeadScoutError as e:
@@ -561,3 +518,151 @@ def run(
         csv_path = csv_path_for_data_file(path)
         export_to_csv(ranked, csv_path)
         click.echo(f"Exported leads to {csv_path}")
+
+
+# ---------------------------------------------------------------------------
+# campaign + report subcommands (feature 06)
+# ---------------------------------------------------------------------------
+
+
+@cli.command()
+@click.option(
+    "--plan",
+    "plan_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="TOML campaign plan file (locations, categories, defaults).",
+)
+@click.option(
+    "--max-jobs",
+    type=int,
+    default=None,
+    help="Cap on jobs run this invocation (None = run until quota or queue exhausts).",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show today's job queue and quota state without running anything.",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Pass-through to run_pipeline: re-run discover/audit even on fresh entries.",
+)
+@click.pass_context
+def campaign(
+    ctx,
+    plan_path: Path,
+    max_jobs: int | None,
+    dry_run: bool,
+    force: bool,
+) -> None:
+    """Run today's slice of a multi-day, multi-location campaign."""
+    # Same env-var contract as `run`: Places key required, Custom Search
+    # optional (soft-fails to local classification), PSI inherits Places.
+    places_key = os.environ.get("GOOGLE_PLACES_API_KEY")
+    cs_key = os.environ.get("GOOGLE_CUSTOM_SEARCH_API_KEY")
+    cs_cx = os.environ.get("GOOGLE_CUSTOM_SEARCH_CX")
+    psi_key = (
+        os.environ.get("GOOGLE_PAGESPEED_API_KEY") or places_key or None
+    )
+    if not places_key:
+        click.echo(
+            "Error: GOOGLE_PLACES_API_KEY is not set in the environment.",
+            err=True,
+        )
+        ctx.exit(1)
+
+    data_dir = Path(ctx.obj["data_dir"])
+    try:
+        summary = run_campaign(
+            plan_path, data_dir,
+            places_key=places_key,
+            cs_key=cs_key,
+            cs_cx=cs_cx,
+            psi_key=psi_key,
+            max_jobs=max_jobs,
+            dry_run=dry_run,
+            force=force,
+        )
+    except (APIError, LeadScoutError, FileNotFoundError) as e:
+        click.echo(f"Error: {e}", err=True)
+        ctx.exit(1)
+
+    # Print the summary in a stable, scannable format. Reads the same
+    # way for dry-runs and real runs.
+    click.echo("=" * 60)
+    click.echo("Campaign summary")
+    click.echo("=" * 60)
+    click.echo(f"  jobs total        : {summary.jobs_total}")
+    click.echo(f"  jobs run          : {summary.jobs_run}")
+    click.echo(f"  jobs skipped fresh: {summary.jobs_skipped_fresh}")
+    click.echo(f"  jobs remaining    : {summary.jobs_remaining}")
+    click.echo(
+        f"  Places quota used : "
+        f"{summary.places_quota_used}/{summary.places_quota_safe_limit}"
+    )
+    if summary.halted_reason:
+        click.echo(f"  halted            : {summary.halted_reason}")
+    if summary.queued_jobs:
+        click.echo("  queued for next run:")
+        for loc, cat in summary.queued_jobs:
+            click.echo(f"    - {loc} / {cat}")
+    click.echo("=" * 60)
+
+
+@cli.command()
+@click.option(
+    "--top",
+    "top_n",
+    type=int,
+    default=50,
+    show_default=True,
+    help="Maximum lead detail rows in the report.",
+)
+@click.option(
+    "--min-tier",
+    type=click.Choice(
+        [t.value for t in LeadTier], case_sensitive=False
+    ),
+    default=LeadTier.MISSING_FEATURES.value,
+    show_default=True,
+    help="Lowest-quality tier to include in the report (skip is always excluded).",
+)
+@click.option(
+    "--output",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Markdown output path. Default: <data-dir>/campaign_report_<date>.md",
+)
+@click.pass_context
+def report(
+    ctx,
+    top_n: int,
+    min_tier: str,
+    output: Path | None,
+) -> None:
+    """Aggregate every per-location JSON into one ranked markdown."""
+    data_dir = Path(ctx.obj["data_dir"])
+    businesses = aggregate_leads(data_dir)
+    if not businesses:
+        click.echo(
+            f"No business data found under {data_dir}. "
+            "Run `leadscout campaign` first."
+        )
+        ctx.exit(1)
+
+    # Default output path uses the UTC date so daily reports don't
+    # overwrite each other. Mirrors markdown_path_for_data_file's
+    # naming pattern.
+    if output is None:
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).date().isoformat()
+        output = data_dir / f"campaign_report_{today}.md"
+
+    export_campaign_markdown(
+        businesses, output,
+        top_n=top_n,
+        min_tier=LeadTier(min_tier),
+    )
+    click.echo(f"Wrote campaign report to {output}")

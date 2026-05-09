@@ -540,10 +540,13 @@ class TestRunCommand:
                 )
             return businesses
 
-        monkeypatch.setattr("leadscout.cli.search_places", fake_search)
-        monkeypatch.setattr("leadscout.cli.discover_urls", fake_discover)
-        monkeypatch.setattr("leadscout.cli.audit_websites", fake_audit)
-        monkeypatch.setattr("leadscout.cli.score_leads", fake_score)
+        # `run` delegates to leadscout.pipeline.run_pipeline, which holds
+        # the actual references to the stage functions. Patch on that
+        # module so the fakes run instead of the real network code.
+        monkeypatch.setattr("leadscout.pipeline.search_places", fake_search)
+        monkeypatch.setattr("leadscout.pipeline.discover_urls", fake_discover)
+        monkeypatch.setattr("leadscout.pipeline.audit_websites", fake_audit)
+        monkeypatch.setattr("leadscout.pipeline.score_leads", fake_score)
 
         result = runner.invoke(
             cli,
@@ -618,11 +621,11 @@ class TestRunCommand:
                 b.lead = Lead(tier=LeadTier.NO_WEBSITE, score=80, reasons=[])
             return businesses
 
-        monkeypatch.setattr("leadscout.cli.search_places", fake_search)
-        monkeypatch.setattr("leadscout.cli.discover_urls", fake_discover)
-        monkeypatch.setattr("leadscout.cli.reclassify_urls", fake_reclassify)
-        monkeypatch.setattr("leadscout.cli.audit_websites", fake_audit)
-        monkeypatch.setattr("leadscout.cli.score_leads", fake_score)
+        monkeypatch.setattr("leadscout.pipeline.search_places", fake_search)
+        monkeypatch.setattr("leadscout.pipeline.discover_urls", fake_discover)
+        monkeypatch.setattr("leadscout.pipeline.reclassify_urls", fake_reclassify)
+        monkeypatch.setattr("leadscout.pipeline.audit_websites", fake_audit)
+        monkeypatch.setattr("leadscout.pipeline.score_leads", fake_score)
 
         result = runner.invoke(
             cli,
@@ -682,11 +685,11 @@ class TestRunCommand:
                 b.lead = Lead(tier=LeadTier.NO_WEBSITE, score=80, reasons=[])
             return businesses
 
-        monkeypatch.setattr("leadscout.cli.search_places", fake_search)
-        monkeypatch.setattr("leadscout.cli.discover_urls", fake_discover)
-        monkeypatch.setattr("leadscout.cli.reclassify_urls", fake_reclassify)
-        monkeypatch.setattr("leadscout.cli.audit_websites", fake_audit)
-        monkeypatch.setattr("leadscout.cli.score_leads", fake_score)
+        monkeypatch.setattr("leadscout.pipeline.search_places", fake_search)
+        monkeypatch.setattr("leadscout.pipeline.discover_urls", fake_discover)
+        monkeypatch.setattr("leadscout.pipeline.reclassify_urls", fake_reclassify)
+        monkeypatch.setattr("leadscout.pipeline.audit_websites", fake_audit)
+        monkeypatch.setattr("leadscout.pipeline.score_leads", fake_score)
 
         result = runner.invoke(
             cli,
@@ -737,10 +740,10 @@ class TestRunCommand:
                 )
             return businesses
 
-        monkeypatch.setattr("leadscout.cli.search_places", fake_search)
-        monkeypatch.setattr("leadscout.cli.discover_urls", fake_discover)
-        monkeypatch.setattr("leadscout.cli.audit_websites", fake_audit)
-        monkeypatch.setattr("leadscout.cli.score_leads", fake_score)
+        monkeypatch.setattr("leadscout.pipeline.search_places", fake_search)
+        monkeypatch.setattr("leadscout.pipeline.discover_urls", fake_discover)
+        monkeypatch.setattr("leadscout.pipeline.audit_websites", fake_audit)
+        monkeypatch.setattr("leadscout.pipeline.score_leads", fake_score)
 
         result = runner.invoke(
             cli,
@@ -789,10 +792,10 @@ class TestRunCommand:
                 )
             return businesses
 
-        monkeypatch.setattr("leadscout.cli.search_places", fake_search)
-        monkeypatch.setattr("leadscout.cli.discover_urls", fake_discover)
-        monkeypatch.setattr("leadscout.cli.audit_websites", fake_audit)
-        monkeypatch.setattr("leadscout.cli.score_leads", fake_score)
+        monkeypatch.setattr("leadscout.pipeline.search_places", fake_search)
+        monkeypatch.setattr("leadscout.pipeline.discover_urls", fake_discover)
+        monkeypatch.setattr("leadscout.pipeline.audit_websites", fake_audit)
+        monkeypatch.setattr("leadscout.pipeline.score_leads", fake_score)
 
         result = runner.invoke(
             cli,
@@ -807,3 +810,132 @@ class TestRunCommand:
         csv_files = list(tmp_path.glob("leads_*.csv"))
         assert len(csv_files) == 1
         assert "Exported leads to" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Campaign + report subcommands (feature 06)
+# ---------------------------------------------------------------------------
+
+
+class TestCampaignCommand:
+    def test_dry_run_invokes_run_campaign_without_api_calls(
+        self, runner, monkeypatch, tmp_path,
+    ):
+        # Plan file referenced by the test fixture lives beside the test
+        # files, so reuse it rather than re-writing.
+        plan_path = (
+            __import__("pathlib").Path(__file__).parent
+            / "fixtures" / "campaign_minimal.toml"
+        )
+        monkeypatch.setenv("GOOGLE_PLACES_API_KEY", "places-key")
+
+        # The campaign command delegates to leadscout.campaign.run_campaign,
+        # which is imported into cli.py at module level. Patching there
+        # is the right hook.
+        captured: dict = {}
+
+        from leadscout.campaign import CampaignSummary
+
+        def fake_run_campaign(plan, data_dir, **kwargs):
+            captured["plan"] = plan
+            captured["dry_run"] = kwargs.get("dry_run")
+            return CampaignSummary(
+                jobs_total=4, jobs_run=0, jobs_skipped_fresh=0,
+                jobs_remaining=4,
+                halted_reason="dry-run (no API calls issued)",
+                places_quota_used=0,
+                places_quota_safe_limit=190,
+                queued_jobs=[("Santa Rosa Beach, FL", "restaurant")],
+            )
+
+        monkeypatch.setattr("leadscout.cli.run_campaign", fake_run_campaign)
+
+        result = runner.invoke(
+            cli,
+            [
+                "--data-dir", str(tmp_path), "campaign",
+                "--plan", str(plan_path), "--dry-run",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        # Dry-run flag propagated through to run_campaign.
+        assert captured["dry_run"] is True
+        # Summary fields surfaced in stdout in the format the user reads.
+        assert "jobs total        : 4" in result.output
+        assert "halted            : dry-run" in result.output
+
+    def test_missing_places_key_exits_with_error(
+        self, runner, monkeypatch, tmp_path,
+    ):
+        # Same hard-fail as `run`. Plan path argument is required by
+        # Click; we still need to satisfy it even though we expect to
+        # bail before parsing the plan.
+        monkeypatch.delenv("GOOGLE_PLACES_API_KEY", raising=False)
+        plan_path = (
+            __import__("pathlib").Path(__file__).parent
+            / "fixtures" / "campaign_minimal.toml"
+        )
+        result = runner.invoke(
+            cli,
+            [
+                "--data-dir", str(tmp_path), "campaign",
+                "--plan", str(plan_path),
+            ],
+        )
+        assert result.exit_code != 0
+        assert "GOOGLE_PLACES_API_KEY" in result.output
+
+
+class TestReportCommand:
+    def test_writes_combined_markdown_across_locations(
+        self, runner, monkeypatch, tmp_path,
+    ):
+        # Pre-seed two location JSONs with one scored lead each.
+        from leadscout.models import Lead, LeadTier
+
+        def _scored(place_id: str, name: str, address: str) -> Business:
+            return Business(
+                place_id=place_id,
+                name=name,
+                address=address,
+                website="",
+                url_source=UrlSource.NONE,
+                url_classification=UrlClassification.NONE,
+                rating=4.5,
+                review_count=12,
+                lead=Lead(
+                    tier=LeadTier.NO_WEBSITE, score=85,
+                    reasons=["No website found"],
+                ),
+            )
+
+        save_data(
+            tmp_path / "santa_rosa_beach_fl.json",
+            [_scored("A", "SRB Cafe", "100 Main St, Santa Rosa Beach, FL 32459, USA")],
+        )
+        save_data(
+            tmp_path / "destin_fl.json",
+            [_scored("B", "Destin Diner", "200 Beach Rd, Destin, FL 32541, USA")],
+        )
+
+        result = runner.invoke(
+            cli,
+            ["--data-dir", str(tmp_path), "report", "--top", "5"],
+        )
+        assert result.exit_code == 0, result.output
+        # Default output file lives in the data dir with today's UTC date.
+        output_files = list(tmp_path.glob("campaign_report_*.md"))
+        assert len(output_files) == 1
+        text = output_files[0].read_text(encoding="utf-8")
+        assert "SRB Cafe" in text
+        assert "Destin Diner" in text
+        assert "Wrote campaign report to" in result.output
+
+    def test_empty_data_dir_exits_nonzero(self, runner, monkeypatch, tmp_path):
+        # No JSON files: the report command should bail with a friendly
+        # message rather than write an empty markdown.
+        result = runner.invoke(
+            cli, ["--data-dir", str(tmp_path), "report"],
+        )
+        assert result.exit_code != 0
+        assert "No business data" in result.output

@@ -70,6 +70,18 @@ CUSTOM_SEARCH_DAILY_LIMIT = 100  # Google's hard cap; informational only
 CUSTOM_SEARCH_SAFE_LIMIT = 95  # Our hard stop; 5-query margin for safety
 CUSTOM_SEARCH_WARN_THRESHOLD = 80  # Log a warning at/after this count
 
+# --- Places API quota (feature 06: campaign cost protection) ---
+# Places (New) is billable against the $200/month Maps Platform credit.
+# Nearby Search costs roughly $0.032/call. To guarantee zero billed
+# spend across a multi-day campaign, PlacesQuotaTracker mirrors the
+# Custom Search tracker pattern: a daily counter persisted to disk
+# at <data_dir>/.places_quota.json, hard-stop at SAFE_LIMIT.
+# 200 calls/day x 30 days x $0.032 = $192/month, just under the credit.
+# 190 (the safe limit) leaves a 10-call cushion for any drift.
+PLACES_DAILY_LIMIT = 200       # Operator-chosen budget; not a Google cap
+PLACES_SAFE_LIMIT = 190        # Our hard stop; 10-call margin
+PLACES_WARN_THRESHOLD = 150    # Log a warning at/after this count
+
 # --- Website audit (feature 04) ---
 # Per-site Playwright timeout. 30s is enough for slow restaurant sites
 # (Wix/Squarespace pages with heavy assets) without making a stalled
@@ -147,3 +159,63 @@ SCORE_SLOW_LOAD_THRESHOLD_S = 5.0  # seconds; load_time over this -> bonus
 SCORE_SLOW_LOAD_BONUS = 3
 SCORE_BROKEN_ASSETS_BONUS = 2  # any broken assets at all
 SCORE_MAX = 100  # cap after all modifiers
+
+# --- Campaign mode (feature 06) ---
+# Defaults applied to a (location, category) job when the plan file's
+# [defaults] table doesn't override them. min_review_count = 1 is the
+# right balance: it drops literal zero-review listings (often abandoned
+# or never-opened storefronts that would burn API quota) while keeping
+# brand-new businesses, which are prime leads (clearly operating, not
+# yet on Google's radar, very likely without a website).
+CAMPAIGN_MIN_REVIEW_COUNT = 1
+# Days a (location, category) pair stays "fresh" between campaign
+# invocations. Re-running a fresh pair is a no-op skip; running a
+# stale one re-fetches Places. 7 mirrors AUDIT_FRESHNESS_DAYS.
+CAMPAIGN_REFRESH_DAYS = 7
+
+# Curated allowlist of Google Places "Table A" types most likely to
+# yield freelance web design leads. The campaign command warns (does
+# not error) on plan-file categories outside this set, so adding a
+# new productive type is just an edit here.
+KNOWN_BUSINESS_TYPES = frozenset({
+    # Food & drink
+    "restaurant", "cafe", "bakery", "bar", "meal_takeaway",
+    # Healthcare
+    "dentist", "doctor", "veterinary_care",
+    "physiotherapist", "chiropractor",
+    # Trades & home services
+    "plumber", "electrician",
+    "roofing_contractor", "general_contractor",
+    # Personal care
+    "hair_care", "beauty_salon", "spa", "nail_salon", "barber_shop",
+    # Fitness
+    "gym", "yoga_studio",
+    # Specialty retail
+    "florist", "pet_store", "jewelry_store", "shoe_store",
+    # Auto & misc services
+    "car_repair", "car_wash", "moving_company", "locksmith",
+    # Professional services
+    "real_estate_agency", "insurance_agency",
+})
+
+# Big national/regional franchise name fragments. Compared via SUBSTRING
+# against a normalized business name (lowercased, punctuation stripped,
+# whitespace collapsed). Examples of matches:
+#   "McDonald's #4521"  -> normalized "mcdonalds 4521"  -> matches "mcdonald"
+#   "Starbucks Reserve" -> normalized "starbucks reserve" -> matches "starbucks"
+# Only add fragments that are unambiguous chain identifiers; "BP" would
+# false-positive on every "BP Auto Parts" and is intentionally omitted.
+BLOCKED_CHAIN_NAMES = frozenset({
+    # Fast food
+    "mcdonald", "subway", "burger king", "wendy", "taco bell",
+    "kfc", "domino", "pizza hut", "papa john", "chipotle", "panera",
+    "dunkin", "chick-fil-a", "chick fil a", "arby", "sonic",
+    "five guys", "5 guys", "jersey mike", "jimmy john",
+    "qdoba", "wingstop", "popeyes", "panda express",
+    # Coffee
+    "starbucks",
+    # Big box / mass retail
+    "walmart", "target", "costco", "home depot", "lowe",
+    # Pharmacy
+    "cvs", "walgreens", "rite aid",
+})
