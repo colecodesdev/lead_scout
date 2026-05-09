@@ -148,6 +148,13 @@ class Business:
     rating: float | None = None
     review_count: int = 0
     business_type: str = ""
+    # Google Places (New) `businessStatus`: "OPERATIONAL",
+    # "CLOSED_TEMPORARILY", "CLOSED_PERMANENTLY", or "" when the API
+    # didn't return it. Empty default keeps prior saved JSON readable
+    # via from_dict's filter (missing key -> dataclass default).
+    # Used by feature 06 (campaign mode) to optionally filter out
+    # closed listings before they consume discovery quota.
+    business_status: str = ""
     # Additional URLs found during discovery phase (besides the primary website)
     discovered_urls: list[str] = field(default_factory=list)
     # When this record was last fetched/refreshed from the source API.

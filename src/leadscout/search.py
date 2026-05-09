@@ -1,10 +1,11 @@
-"""Google Places (New) integration: discover restaurants in a target area.
+"""Google Places (New) integration: discover businesses in a target area.
 
 This is the first stage of the LeadScout pipeline. Given a city/state string
 and a search radius, it:
 
 1. Geocodes the location to a lat/lng (Geocoding API).
-2. Calls the Places Nearby Search (New) endpoint, filtered to restaurants.
+2. Calls the Places Nearby Search (New) endpoint, filtered to the requested
+   business types (defaults to restaurants).
 3. Paginates through `nextPageToken` until exhausted, respecting Google's
    ~2s delay before a fresh page token becomes valid.
 4. Parses each result into a `Business` dataclass with `url_source` /
@@ -17,13 +18,22 @@ call per business would burn the free quota faster than we want).
 import logging
 import time
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 import httpx
 
 from leadscout.api import create_client, with_api_retry
-from leadscout.config import PLACES_API_SLEEP
+from leadscout.config import DEFAULT_BUSINESS_TYPES, PLACES_API_SLEEP
 from leadscout.exceptions import APIError
 from leadscout.models import Business, UrlClassification, UrlSource
+
+# TYPE_CHECKING block: PlacesQuotaTracker is referenced only in type
+# annotations on optional parameters. Importing it at runtime would
+# create a hard dependency just to satisfy a hint. The string form
+# of the annotations resolves correctly under `from typing import
+# get_type_hints` without needing this import to be eager.
+if TYPE_CHECKING:
+    from leadscout.places_quota import PlacesQuotaTracker
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +66,8 @@ FIELD_MASK = (
     "places.nationalPhoneNumber,"
     "places.websiteUri,"
     "places.rating,"
+    "places.userRatingCount,"
+    "places.businessStatus,"
     "places.types"
 )
 
@@ -65,28 +77,54 @@ FIELD_MASK = (
 # minimum; we use 2.5s to give a small safety margin.
 NEXT_PAGE_TOKEN_DELAY = 2.5
 
-# Type filter for the Nearby Search request. "restaurant" is one of the
-# Google Places "Table A" type values; it matches restaurants of all
-# cuisines (more specific subtypes still match this category).
-RESTAURANT_TYPE = "restaurant"
-
-
-def search_places(location: str, radius: int, api_key: str) -> list[Business]:
-    """Discover restaurants near a location.
+def search_places(
+    location: str,
+    radius: int,
+    api_key: str,
+    *,
+    included_types: list[str] | None = None,
+    quota: "PlacesQuotaTracker | None" = None,
+) -> list[Business]:
+    """Discover businesses near a location.
 
     Geocodes the location string, then runs Places Nearby Search around the
     resulting coordinates. Returns a list of Business dataclasses, one per
-    restaurant found across all paginated result pages.
+    business found across all paginated result pages.
+
+    Args:
+        included_types: Google Places "Table A" type strings to filter by
+            (e.g. ["restaurant"], ["dentist", "doctor"]). Defaults to
+            DEFAULT_BUSINESS_TYPES from config.py.
+        quota: Optional PlacesQuotaTracker. When supplied, every Places
+            (New) request (geocoding included) calls quota.consume() first
+            and raises APIError if the daily safe limit is reached. The
+            single-shot `search` and `run` CLI commands pass None (no
+            campaign-level cost ceiling). The campaign command always
+            passes a tracker.
 
     Raises APIError on unrecoverable failures (bad API key, exhausted quota
     after retries, geocoding failure, no results for the location). Transient
     failures are retried automatically by `with_api_retry` in `api.py`.
     """
+    # Fall back to config default when the caller doesn't specify types.
+    if included_types is None:
+        included_types = DEFAULT_BUSINESS_TYPES
+
     # `with` ensures the underlying connection pool is closed even if an
     # exception escapes. Both endpoints share the same client.
     with create_client() as client:
+        # Geocoding is a separate Maps Platform SKU but billed against
+        # the same monthly credit. Count it under the same tracker so
+        # the budget reflects total Maps API spend, not just Places.
+        if quota is not None and not quota.consume():
+            raise APIError(
+                "Places daily safe limit reached; campaign halted before "
+                "geocoding. Resumes at UTC midnight."
+            )
         lat, lng = _geocode(client, location, api_key)
-        return _search_nearby(client, lat, lng, radius, api_key)
+        return _search_nearby(
+            client, lat, lng, radius, api_key, included_types, quota=quota,
+        )
 
 
 # --- Geocoding ---
@@ -154,6 +192,7 @@ def _nearby_request(
     lng: float,
     radius: int,
     api_key: str,
+    included_types: list[str],
     page_token: str | None = None,
 ) -> dict:
     """Single POST to the Places Nearby Search (New) endpoint. Returns parsed JSON.
@@ -171,11 +210,12 @@ def _nearby_request(
         "X-Goog-Api-Key": api_key,
     }
     # Body schema is documented at the URL in the module docstring.
-    # `includedTypes` filters to a single Places "Table A" type.
+    # `includedTypes` filters to one or more Places "Table A" types
+    # (e.g. ["restaurant"], ["dentist", "doctor"]).
     # `locationRestriction.circle` constrains the search to a circular
     # area; radius is in meters.
     body: dict = {
-        "includedTypes": [RESTAURANT_TYPE],
+        "includedTypes": included_types,
         "locationRestriction": {
             "circle": {
                 "center": {"latitude": lat, "longitude": lng},
@@ -200,6 +240,9 @@ def _search_nearby(
     lng: float,
     radius: int,
     api_key: str,
+    included_types: list[str],
+    *,
+    quota: "PlacesQuotaTracker | None" = None,
 ) -> list[Business]:
     """Run paginated Nearby Search and return parsed Business objects.
 
@@ -210,6 +253,13 @@ def _search_nearby(
     Catches the auth/quota HTTP errors that tenacity ultimately couldn't
     recover from and re-raises them as APIError so the CLI can surface a
     clean message.
+
+    quota: optional PlacesQuotaTracker; when supplied, each request body
+    issued by this function increments the tracker first. If the safe
+    limit is reached mid-pagination we stop and return what we've collected
+    so far rather than raising — partial results are still useful, the
+    pagination loop only triggers in practice for Text Search anyway
+    (Nearby Search returns all 20 results in one shot, no token).
     """
     businesses: list[Business] = []
     page_token: str | None = None
@@ -223,10 +273,23 @@ def _search_nearby(
         if page_token:
             time.sleep(NEXT_PAGE_TOKEN_DELAY)
 
+        # Quota check before issuing the request. Halting here (rather
+        # than raising) keeps the partial result set the caller already
+        # paid for. In practice this only fires for the rare Text-Search
+        # multi-page case; Nearby Search single-shots and won't loop.
+        if quota is not None and not quota.consume():
+            logger.warning(
+                "Places quota at safe limit; stopping Nearby pagination "
+                "with %d results collected.",
+                len(businesses),
+            )
+            break
+
         page_index += 1
         try:
             data = _nearby_request(
-                client, lat, lng, radius, api_key, page_token=page_token
+                client, lat, lng, radius, api_key, included_types,
+                page_token=page_token,
             )
         except httpx.HTTPStatusError as e:
             # tenacity has already exhausted retries on retryable codes
@@ -291,7 +354,11 @@ def _parse_place(place: dict) -> Business:
     - `nationalPhoneNumber` -> phone (only sometimes present in Nearby; we
       take it when offered, otherwise leave blank for the audit stage)
     - `websiteUri` -> website (drives url_source/url_classification below)
-    - `rating` -> rating
+    - `rating` -> rating (1-5 scale, average of all user ratings)
+    - `userRatingCount` -> review_count (total ratings; feature 06's
+      dead-business filter drops `review_count == 0` listings)
+    - `businessStatus` -> business_status ("OPERATIONAL" / "CLOSED_*"
+      / missing); feature 06 may filter on this
     - `types[0]` -> business_type (first entry is the most specific type)
     """
     # Defensive .get() everywhere because Google sometimes omits fields.
@@ -305,6 +372,11 @@ def _parse_place(place: dict) -> Business:
     address = place.get("formattedAddress", "")
     phone = place.get("nationalPhoneNumber", "")
     rating = place.get("rating")
+    # Defaults to 0 (matches Business dataclass) so a missing field
+    # serializes the same way an explicit zero would. int() coerces
+    # in case the API returns a string-encoded number for any reason.
+    review_count = int(place.get("userRatingCount") or 0)
+    business_status = place.get("businessStatus", "")
     website = place.get("websiteUri", "")
     types = place.get("types") or []
     # First type is typically the most specific (e.g., "seafood_restaurant"
@@ -333,6 +405,8 @@ def _parse_place(place: dict) -> Business:
         url_source=url_source,
         url_classification=url_classification,
         rating=rating,
+        review_count=review_count,
         business_type=business_type,
+        business_status=business_status,
         last_scanned=datetime.now(timezone.utc),
     )

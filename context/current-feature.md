@@ -1,10 +1,19 @@
 # Current Feature
 
-## Status: Not Started
+## Status: In Progress — `06-campaign-mode.md`
 
 ## Goals
 
+Extend LeadScout from "one location, one category" to a multi-day, multi-location, multi-category campaign mode. New `campaign` subcommand processes one day's slice of jobs (cron-friendly via Task Scheduler), filtering out dead listings and named franchise chains before they consume API quota. New `report` subcommand aggregates ranked leads across every per-location JSON into one combined markdown. Single billable surface (Google Places) gets a hard daily safe-limit tracker so cost is bounded to $0 against the $200/month free credit.
+
 ## Notes
+
+- Built on top of `feat: accept multiple business types via --category` (`51b4242`), which generalizes search/run beyond restaurants.
+- Campaign run model: daily-slice + Windows Task Scheduler, resumable, idempotent.
+- Categories: curated allowlist in config.py; unknown types log warning but still run.
+- Min review count default: 1 (drops literal zero-review listings; keeps brand-new businesses which are prime leads).
+- Chain handling: block-list named franchises (McDonald's, Subway, Starbucks, etc.) before discover. No dedup in the report — a franchise in two cities = two prospects.
+- Custom Search isn't in use; campaign inherits the existing soft-fail to local `reclassify_urls`. PSI is free and shares the Places key.
 
 ## History
 

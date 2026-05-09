@@ -1,0 +1,16 @@
+# Minimal campaign plan used by tests/test_campaign.py.
+# Two locations × two categories = four JobSpecs after expansion.
+# `radius` lives in [defaults] so the cross-product test can confirm
+# the default propagates into each generated JobSpec.
+
+[defaults]
+radius = 4000
+min_review_count = 1
+
+[[jobs]]
+location = "Santa Rosa Beach, FL"
+categories = ["restaurant", "dentist"]
+
+[[jobs]]
+location = "Destin, FL"
+categories = ["gym", "spa"]
