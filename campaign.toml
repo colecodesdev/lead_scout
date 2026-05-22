@@ -1,0 +1,16 @@
+# LeadScout campaign plan.
+# Edit locations and categories to suit. Each (location, category) pair
+# becomes one job; the daily slice halts when the Places quota safe
+# limit is reached.
+
+[defaults]
+radius = 5000
+min_review_count = 1
+
+[[jobs]]
+location = "Santa Rosa Beach, FL"
+categories = ["restaurant", "dentist"]
+
+[[jobs]]
+location = "Destin, FL"
+categories = ["gym", "spa"]
